@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Maprisma LLM Monitor
+Comment=Local LLMs in the panel: GPU memory, context use and runtimes
+Type=Application
+Exec=maprisma-llm-monitor
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;LLM;GPU;llama.cpp;Ollama;
+Icon=io.github.ubruckhaus.CosmicMaprismaLlmMonitor-symbolic
+NoDisplay=true
+X-CosmicApplet=true
+X-HostWaylandDisplay=true
+X-CosmicHoverPopup=Auto
+X-OverflowPriority=10

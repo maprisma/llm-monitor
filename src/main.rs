@@ -1,0 +1,824 @@
+// LLM Monitor for COSMIC: a panel applet for local LLMs. A dim chip while no
+// model is loaded; while a runtime holds one, the GPU memory of local models and
+// how full the context is, coloured green to red, with a fill line under the
+// chip. It pulses while the GPU is generating. Left click opens the details,
+// right click opens btop.
+//
+// The data comes from scripts/llm-monitor.py (the same collector as the GNOME
+// extension and the Omarchy widget), which streams one JSON snapshot every two
+// seconds. It only reads /proc, sysfs and the runtimes' local APIs; it never
+// starts or stops a runtime.
+
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use cosmic::app::{Core, Task};
+use cosmic::applet::cosmic_panel_config::PanelAnchor;
+use cosmic::applet::{menu_button, padded_control};
+use cosmic::iced::futures::SinkExt;
+use cosmic::iced::futures::channel::mpsc;
+use cosmic::iced::platform_specific::shell::wayland::commands::popup::destroy_popup;
+use cosmic::iced::widget::{Row, container as iced_container, text as iced_text};
+use cosmic::iced::{Alignment, Background, Border, Color, Length, Rectangle, Subscription, stream, window};
+use cosmic::widget::rectangle_tracker::{RectangleTracker, RectangleUpdate, rectangle_tracker_subscription};
+use cosmic::widget::{Id, autosize, button, column, container, divider, icon, mouse_area, row, scrollable, space, text};
+use cosmic::{Element, theme};
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+const APP_ID: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor";
+const ICON: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-symbolic";
+static AUTOSIZE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("llm-monitor-autosize"));
+
+const GIB: f64 = 1073741824.0;
+const MIB: f64 = 1048576.0;
+const SPILL_SHOWN: f64 = 268435456.0; // evicted model memory worth a "!" and a warning
+const RESTART_DELAY: Duration = Duration::from_secs(5); // before a collector that exited starts again
+const POPUP_WIDTH: f32 = 400.0;
+const POPUP_MAX_HEIGHT: f32 = 760.0;
+
+static FREEING: AtomicBool = AtomicBool::new(false);
+
+fn main() -> cosmic::iced::Result {
+    cosmic::applet::run::<Monitor>(())
+}
+
+// ------------------------------------------------------------------------- formatting
+
+// Context level: green < 50 % ≤ yellow < 75 % ≤ orange < 90 % ≤ red.
+fn level_color(fraction: f64) -> Color {
+    if fraction >= 0.9 {
+        Color::from_rgb8(0xe0, 0x1b, 0x24)
+    } else if fraction >= 0.75 {
+        Color::from_rgb8(0xff, 0x78, 0x00)
+    } else if fraction >= 0.5 {
+        Color::from_rgb8(0xf6, 0xd3, 0x2d)
+    } else {
+        Color::from_rgb8(0x33, 0xd1, 0x7a)
+    }
+}
+
+fn num(value: &Value, key: &str) -> Option<f64> {
+    value.get(key).and_then(Value::as_f64).filter(|v| v.is_finite())
+}
+
+fn n(value: &Value, key: &str) -> f64 {
+    num(value, key).unwrap_or(0.0)
+}
+
+fn s<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn gib(bytes: f64) -> String {
+    format!("{:.1}", bytes / GIB)
+}
+
+fn pct(value: Option<f64>) -> String {
+    value.map_or("—".into(), |v| format!("{}%", v.round()))
+}
+
+fn rate(value: Option<f64>) -> String {
+    value.map_or("—".into(), |v| if v >= 100.0 { format!("{v:.0}") } else { format!("{v:.1}") })
+}
+
+fn mib(bytes: f64) -> String {
+    if bytes >= GIB { format!("{} GiB", gib(bytes)) } else { format!("{} MiB", (bytes / MIB).round()) }
+}
+
+fn tokens(value: f64) -> String {
+    if value >= 10000.0 {
+        format!("{:.0}k", value / 1000.0)
+    } else if value >= 1000.0 {
+        format!("{:.1}k", value / 1000.0)
+    } else {
+        format!("{value}")
+    }
+}
+
+fn ctx_text(value: f64) -> String {
+    if value <= 0.0 {
+        String::new()
+    } else if value >= 1024.0 {
+        format!("{}k ctx", (value / 1024.0).round())
+    } else {
+        format!("{value} ctx")
+    }
+}
+
+// Share of the main model's context in use, or None when unknown.
+fn context_fraction(stats: &Value) -> Option<f64> {
+    if stats.get("active").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let p = stats.get("primary")?;
+    let context = num(p, "context").filter(|c| *c > 0.0)?;
+    let used = num(p, "context_used")?;
+    Some((used / context).clamp(0.0, 1.0))
+}
+
+fn models(runtime: &Value) -> &[Value] {
+    runtime.get("models").and_then(Value::as_array).map_or(&[], Vec::as_slice)
+}
+
+fn runtime_state(runtime: &Value) -> String {
+    if runtime.get("running").and_then(Value::as_bool) != Some(true) {
+        return if runtime.get("installed").and_then(Value::as_bool) == Some(false) {
+            "not installed".into()
+        } else {
+            "stopped".into()
+        };
+    }
+    let all = models(runtime);
+    let resident = all.iter().filter(|m| s(m, "state") != "sleeping").count();
+    match resident {
+        1 => "1 model loaded".into(),
+        0 if !all.is_empty() => "model sleeping (GPU free)".into(),
+        0 => "running, no model".into(),
+        count => format!("{count} models loaded"),
+    }
+}
+
+// ------------------------------------------------------------------------- widgets
+
+fn dim_text(theme: &cosmic::Theme) -> iced_text::Style {
+    let mut color = Color::from(theme.cosmic().on_bg_color());
+    color.a = 0.6;
+    iced_text::Style { color: Some(color), ..Default::default() }
+}
+
+fn accent_text(theme: &cosmic::Theme) -> iced_text::Style {
+    iced_text::Style { color: Some(Color::from(theme.cosmic().accent_text_color())), ..Default::default() }
+}
+
+fn dim<'a>(content: impl Into<std::borrow::Cow<'a, str>> + 'a) -> Element<'a, Message> {
+    text::caption(content).class(theme::Text::Custom(dim_text)).into()
+}
+
+fn fill(color: Color, radius: f32) -> theme::Container<'static> {
+    theme::Container::custom(move |_| iced_container::Style {
+        background: Some(Background::Color(color)),
+        border: Border { radius: radius.into(), ..Default::default() },
+        ..Default::default()
+    })
+}
+
+fn track(radius: f32) -> theme::Container<'static> {
+    theme::Container::custom(move |theme: &cosmic::Theme| {
+        let mut color = Color::from(theme.cosmic().on_bg_color());
+        color.a = 0.12;
+        iced_container::Style {
+            background: Some(Background::Color(color)),
+            border: Border { radius: radius.into(), ..Default::default() },
+            ..Default::default()
+        }
+    })
+}
+
+fn accent_fill(radius: f32) -> theme::Container<'static> {
+    theme::Container::custom(move |theme: &cosmic::Theme| iced_container::Style {
+        background: Some(Background::Color(Color::from(theme.cosmic().accent_color()))),
+        border: Border { radius: radius.into(), ..Default::default() },
+        ..Default::default()
+    })
+}
+
+fn neutral_fill(radius: f32) -> theme::Container<'static> {
+    theme::Container::custom(move |theme: &cosmic::Theme| {
+        let mut color = Color::from(theme.cosmic().on_bg_color());
+        color.a = 0.45;
+        iced_container::Style {
+            background: Some(Background::Color(color)),
+            border: Border { radius: radius.into(), ..Default::default() },
+            ..Default::default()
+        }
+    })
+}
+
+// A rounded track with fills side by side, each (fraction, its style).
+fn bar<'a>(segments: Vec<(f64, theme::Container<'static>)>, height: f32) -> Element<'a, Message> {
+    let mut line = Row::new().width(Length::Fill).height(Length::Fixed(height));
+    let mut used: u16 = 0;
+    for (fraction, class) in segments {
+        let part = (fraction.clamp(0.0, 1.0) * 1000.0).round() as u16;
+        let part = part.min(1000 - used);
+        if part == 0 {
+            continue;
+        }
+        used += part;
+        line = line.push(
+            container(space::horizontal())
+                .width(Length::FillPortion(part))
+                .height(Length::Fill)
+                .class(class),
+        );
+    }
+    if used < 1000 {
+        line = line.push(space::horizontal().width(Length::FillPortion(1000 - used)));
+    }
+    container(line).width(Length::Fill).class(track(height / 2.0)).into()
+}
+
+fn level_bar<'a>(fraction: f64) -> Element<'a, Message> {
+    bar(vec![(fraction, fill(level_color(fraction), 3.0))], 4.0)
+}
+
+// Label left, value right, a bar underneath.
+fn meter<'a>(name: String, value: String, fraction: f64) -> Element<'a, Message> {
+    column![
+        row![dim(name), space::horizontal().width(Length::Fill), text::caption(value)].align_y(Alignment::Center),
+        bar(vec![(fraction, neutral_fill(3.0))], 6.0),
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn swatch<'a>(class: theme::Container<'static>) -> Element<'a, Message> {
+    container(space::horizontal()).width(Length::Fixed(10.0)).height(Length::Fixed(10.0)).class(class).into()
+}
+
+// Swatch, name, amount; an optional note below and an optional level bar.
+fn legend<'a>(
+    swatch_class: theme::Container<'static>,
+    name: &'static str,
+    amount: String,
+    note: String,
+    fraction: Option<f64>,
+) -> Element<'a, Message> {
+    let mut block = column![
+        row![
+            swatch(swatch_class),
+            text::caption(name),
+            space::horizontal().width(Length::Fill),
+            text::caption(amount)
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+    ]
+    .spacing(3);
+    if !note.is_empty() {
+        block = block.push(container(dim(note)).padding([0, 0, 0, 18]));
+    }
+    if let Some(fraction) = fraction {
+        block = block.push(container(level_bar(fraction)).padding([0, 0, 0, 18]));
+    }
+    block.into()
+}
+
+fn section<'a>(title: &'static str) -> Element<'a, Message> {
+    container(text::caption_heading(title.to_uppercase()).class(theme::Text::Custom(dim_text)))
+        .padding([8, 0, 0, 0])
+        .into()
+}
+
+// ------------------------------------------------------------------------- applet
+
+#[derive(Default)]
+struct Monitor {
+    core: Core,
+    popup: Option<window::Id>,
+    rectangle: Rectangle,
+    tracker: Option<RectangleTracker<u32>>,
+    stats: Value,
+    pulse_dim: bool,
+}
+
+#[derive(Debug, Clone)]
+enum Message {
+    Stats(Value),
+    TogglePopup,
+    CloseRequested(window::Id),
+    Rectangle(RectangleUpdate<u32>),
+    FreeGpu,
+    OpenBtop,
+    Pulse,
+}
+
+impl Monitor {
+    fn active(&self) -> bool {
+        self.stats.get("active").and_then(Value::as_bool) == Some(true)
+    }
+
+    fn busy(&self) -> bool {
+        self.stats.get("busy").and_then(Value::as_bool) == Some(true)
+    }
+
+    // The bar: chip, "2.7G 31%" while a model is loaded, the context line under the chip.
+    fn panel_content(&self) -> Element<'_, Message> {
+        let active = self.active();
+        let fraction = context_fraction(&self.stats);
+        let icon_size = self.core.applet.suggested_size(true).0;
+        let chip = icon::from_name(ICON).size(icon_size).symbolic(true).icon();
+        let line: Element<Message> = match fraction {
+            Some(f) => container(bar(vec![(f.max(0.03), fill(level_color(f), 1.0))], 2.0))
+                .width(Length::Fixed(icon_size as f32))
+                .into(),
+            None => space::vertical().height(Length::Fixed(2.0)).into(),
+        };
+        let chip = column![chip, line].spacing(2).align_x(Alignment::Center);
+        if !active {
+            return chip.into();
+        }
+        let spilled = n(&self.stats, "llm_spilled") > SPILL_SHOWN;
+        let mut label = format!("{}G{}", gib(n(&self.stats, "llm_vram")), if spilled { "!" } else { "" });
+        if let Some(f) = fraction {
+            label += &format!(" {}%", (f * 100.0).round());
+        }
+        let mut color = fraction.map(level_color);
+        if self.busy() && self.pulse_dim {
+            // Pulses while the GPU is generating.
+            let mut c = color.unwrap_or(Color::WHITE);
+            c.a = 0.45;
+            color = Some(c);
+        }
+        let label = self.core.applet.text(label);
+        let label: Element<Message> = match color {
+            Some(c) => label.class(theme::Text::Color(c)).into(),
+            None => label.class(theme::Text::Custom(accent_text)).into(),
+        };
+        let horizontal = matches!(self.core.applet.anchor, PanelAnchor::Top | PanelAnchor::Bottom);
+        if horizontal {
+            row![chip, label].spacing(6).align_y(Alignment::Center).into()
+        } else {
+            column![chip, label].spacing(2).align_x(Alignment::Center).into()
+        }
+    }
+
+    fn runtime_block<'a>(&self, runtime: &Value) -> Element<'a, Message> {
+        let all = models(runtime);
+        let loaded = all.iter().any(|m| s(m, "state") != "sleeping");
+        let running = runtime.get("running").and_then(Value::as_bool) == Some(true);
+        let dot: theme::Container<'static> = if loaded {
+            accent_fill(4.0)
+        } else if running {
+            neutral_fill(4.0)
+        } else {
+            track(4.0)
+        };
+        let state = runtime_state(runtime);
+        let state: Element<Message> = if loaded {
+            text::caption(state).class(theme::Text::Custom(accent_text)).into()
+        } else {
+            dim(state)
+        };
+        let name = s(runtime, "name").to_string();
+        let name: Element<Message> = if loaded { text::heading(name).into() } else { text::body(name).into() };
+        let mut block = column![
+            row![
+                container(space::horizontal()).width(Length::Fixed(8.0)).height(Length::Fixed(8.0)).class(dot),
+                name,
+                space::horizontal().width(Length::Fill),
+                state
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+        ]
+        .spacing(3);
+
+        for model in all {
+            let context = n(model, "context");
+            let used = num(model, "context_used");
+            let has_usage = used.is_some() && context > 0.0;
+            let mut title = s(model, "name").to_string();
+            if context > 0.0 && !has_usage {
+                title += &format!("  ·  {}", ctx_text(context));
+            }
+            let state = s(model, "state");
+            if !state.is_empty() && state != "loaded" {
+                title += &format!("  ·  {state}");
+            }
+            block = block.push(container(text::caption(title)).padding([0, 0, 0, 16]));
+            let Some(used) = used.filter(|_| has_usage) else { continue };
+            // Tokens in the context window, and the VRAM reserved for it (KV cache).
+            let fraction = used / context;
+            let memory = n(model, "context_memory");
+            let caption = if memory > 0.0 { format!("Context  ·  {} VRAM", mib(memory)) } else { "Context".into() };
+            let value = format!("{} / {} tokens ({}%)", tokens(used), tokens(context), (fraction * 100.0).round());
+            let value: Element<Message> = if fraction >= 0.9 {
+                text::caption(value).class(theme::Text::Color(level_color(fraction))).into()
+            } else {
+                text::caption(value).into()
+            };
+            block = block.push(
+                container(row![dim(caption), space::horizontal().width(Length::Fill), value].align_y(Alignment::Center))
+                    .padding([0, 0, 0, 16]),
+            );
+            block = block.push(container(level_bar(fraction)).padding([0, 0, 0, 16]));
+        }
+
+        if running {
+            let spilled = n(runtime, "spilled");
+            let mut details = vec![
+                format!(
+                    "VRAM {} GiB{}",
+                    gib(n(runtime, "vram")),
+                    if spilled > SPILL_SHOWN { format!(" (+{} GiB in RAM)", gib(spilled)) } else { String::new() }
+                ),
+                format!("CPU {}", pct(num(runtime, "cpu"))),
+                format!("RAM {} GiB", gib(n(runtime, "memory"))),
+            ];
+            let clients: Vec<&str> = runtime
+                .get("clients")
+                .and_then(Value::as_array)
+                .map(|c| c.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if !clients.is_empty() {
+                details.push(format!("used by {}", clients.join(", ")));
+            }
+            block = block.push(container(dim(details.join("  ·  "))).padding([0, 0, 0, 16]));
+        }
+        block.into()
+    }
+
+    fn details(&self) -> Element<'_, Message> {
+        let stats = &self.stats;
+        let null = Value::Null;
+        let gpu = stats.get("gpu").unwrap_or(&null);
+        let system = stats.get("system").unwrap_or(&null);
+        let primary = stats.get("primary").filter(|p| p.is_object());
+        let p = primary.unwrap_or(&null);
+        let total = n(gpu, "vram_total");
+        let free = (total - n(gpu, "vram_used")).max(0.0);
+        let all = if total > 0.0 { total } else { 1.0 };
+
+        // Header: title, what is loaded, generating / idle.
+        let meta = match primary {
+            Some(p) => {
+                let model = s(p, "model");
+                if model.is_empty() { s(p, "runtime").to_string() } else { format!("{} · {model}", s(p, "runtime")) }
+            }
+            None => "No local model loaded".into(),
+        };
+        let pill = if self.busy() { "generating" } else if self.active() { "idle" } else { "" };
+        let mut header = row![
+            icon::from_name(ICON).size(32).symbolic(true).icon(),
+            column![text::title4("Maprisma LLM Monitor"), dim(meta)].spacing(2),
+            space::horizontal().width(Length::Fill),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+        if !pill.is_empty() {
+            header = header.push(container(text::caption(pill)).padding([2, 10]).class(track(10.0)));
+        }
+
+        let mut content = column![header, divider::horizontal::default()].spacing(8);
+
+        // GPU memory: total, one stacked bar (LLM / desktop & apps / free), legend.
+        content = content.push(section("GPU memory"));
+        content = content.push(
+            row![
+                text::heading(format!("{} of {} GiB in use", gib(n(gpu, "vram_used")), gib(total))),
+                space::horizontal().width(Length::Fill),
+                dim(format!("{} GiB free", gib(free))),
+            ]
+            .align_y(Alignment::Center),
+        );
+        content = content.push(bar(
+            vec![
+                (n(stats, "llm_vram") / all, accent_fill(0.0)),
+                (n(stats, "other_vram") / all, neutral_fill(0.0)),
+            ],
+            10.0,
+        ));
+        content = content.push(legend(
+            accent_fill(3.0),
+            "LLM models",
+            format!("{} GiB", gib(n(stats, "llm_vram"))),
+            "↑ this number is shown in the bar".into(),
+            None,
+        ));
+
+        // The two buffers that fill while you work: the context (whole
+        // conversation) and the reply being generated.
+        let context = n(p, "context");
+        if let Some(used) = num(p, "context_used").filter(|_| context > 0.0) {
+            let filled = used / context;
+            let memory = n(p, "context_memory");
+            content = content.push(legend(
+                fill(level_color(filled), 3.0),
+                "Context buffer",
+                if memory > 0.0 {
+                    format!("≈ {} of {}", mib(memory * filled), mib(memory))
+                } else {
+                    format!("{}%", (filled * 100.0).round())
+                },
+                format!("{} / {} tokens ({}%)", tokens(used), tokens(context), (filled * 100.0).round()),
+                Some(filled),
+            ));
+        }
+        let limit = n(p, "output_limit");
+        if limit > 0.0 {
+            let used = n(p, "output_used");
+            let filled = used / limit;
+            let memory = n(p, "context_memory");
+            let counts = format!("{} / {} tokens ({}%)", tokens(used), tokens(limit), (filled * 100.0).round());
+            let generating = p.get("generating").and_then(Value::as_bool) == Some(true);
+            content = content.push(legend(
+                fill(level_color(filled), 3.0),
+                "Output buffer",
+                if memory > 0.0 && context > 0.0 {
+                    format!("≈ {}", mib(memory * used / context))
+                } else {
+                    format!("{}%", (filled * 100.0).round())
+                },
+                if generating { format!("generating {counts}") } else { format!("last reply {counts}") },
+                Some(filled),
+            ));
+        }
+        let apps: Vec<String> = stats
+            .get("other_apps")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().map(|app| format!("{} {}", s(app, "name"), gib(n(app, "vram")))).collect())
+            .unwrap_or_default();
+        content = content.push(legend(
+            neutral_fill(3.0),
+            "Desktop & apps",
+            format!("{} GiB", gib(n(stats, "other_vram"))),
+            apps.join(" · "),
+            None,
+        ));
+        content = content.push(legend(track(3.0), "Free", format!("{} GiB", gib(free)), String::new(), None));
+        let spilled = n(stats, "llm_spilled");
+        if spilled > SPILL_SHOWN {
+            content = content.push(
+                text::caption(format!(
+                    "⚠ {} GiB of model memory does not fit in VRAM and was moved to system RAM. \
+                     Generation is much slower; unload other models or free GPU memory.",
+                    gib(spilled)
+                ))
+                .class(theme::Text::Color(level_color(0.8))),
+            );
+        }
+
+        // GPU activity and generation speed.
+        content = content.push(section("GPU activity"));
+        let mut load = pct(num(gpu, "busy"));
+        if let Some(temp) = num(gpu, "temp").filter(|t| *t > 0.0) {
+            load += &format!("  ·  {} °C", temp.round());
+        }
+        if let Some(power) = num(gpu, "power").filter(|w| *w > 0.0) {
+            load += &format!("  ·  {} W", power.round());
+        }
+        content = content.push(meter("Load".into(), load, n(gpu, "busy") / 100.0));
+        if let Some(speed) = p.get("speed").filter(|v| v.is_object()) {
+            let avg = num(speed, "avg");
+            let max = num(speed, "max");
+            let now = num(speed, "now");
+            let stat = if n(speed, "count") > 0.0 {
+                format!("  ·  min {}  avg {}  max {}", rate(num(speed, "min")), rate(avg), rate(max))
+            } else if avg.is_some_and(|a| a > 0.0) {
+                format!("  ·  avg {} since load", rate(avg))
+            } else {
+                String::new()
+            };
+            let value = match now {
+                Some(v) => format!("{} tok/s", rate(Some(v))),
+                None if avg.is_some_and(|a| a > 0.0) => "idle".into(),
+                None => String::new(),
+            };
+            let fraction = match now {
+                Some(v) if v > 0.0 => v / v.max(max.unwrap_or(0.0)),
+                _ => 0.0,
+            };
+            content = content.push(meter(format!("Speed{stat}"), value, fraction));
+        }
+
+        content = content.push(section("System"));
+        content = content.push(meter("CPU".into(), pct(num(system, "cpu")), n(system, "cpu") / 100.0));
+        let mem_total = n(system, "mem_total");
+        content = content.push(meter(
+            "RAM".into(),
+            format!("{} / {} GiB", gib(n(system, "mem_used")), gib(mem_total)),
+            if mem_total > 0.0 { n(system, "mem_used") / mem_total } else { 0.0 },
+        ));
+
+        // One block per runtime.
+        content = content.push(divider::horizontal::default());
+        content = content.push(section("Runtimes"));
+        if let Some(runtimes) = stats.get("runtimes").and_then(Value::as_array) {
+            for runtime in runtimes {
+                content = content.push(self.runtime_block(runtime));
+            }
+        } else {
+            content = content.push(dim("Waiting for the collector…"));
+        }
+        content.spacing(8).into()
+    }
+}
+
+impl cosmic::Application for Monitor {
+    type Executor = cosmic::SingleThreadExecutor;
+    type Flags = ();
+    type Message = Message;
+    const APP_ID: &'static str = APP_ID;
+
+    fn core(&self) -> &Core {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
+
+    fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
+        (Self { core, ..Default::default() }, Task::none())
+    }
+
+    fn on_close_requested(&self, id: window::Id) -> Option<Message> {
+        Some(Message::CloseRequested(id))
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        let mut subscriptions = vec![
+            rectangle_tracker_subscription(0).map(|update| Message::Rectangle(update.1)),
+            Subscription::run_with("llm-monitor-collector", |_| {
+                stream::channel(4, |mut output| async move {
+                    run_collector(&mut output).await;
+                })
+            }),
+        ];
+        if self.busy() {
+            subscriptions.push(cosmic::iced::time::every(Duration::from_millis(650)).map(|_| Message::Pulse));
+        }
+        Subscription::batch(subscriptions)
+    }
+
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::Stats(stats) => {
+                self.stats = stats;
+                if !self.busy() {
+                    self.pulse_dim = false;
+                }
+            }
+            Message::Pulse => self.pulse_dim = !self.pulse_dim,
+            Message::Rectangle(update) => match update {
+                RectangleUpdate::Rectangle(r) => self.rectangle = r.1,
+                RectangleUpdate::Init(tracker) => self.tracker = Some(tracker),
+            },
+            Message::CloseRequested(id) => {
+                if self.popup == Some(id) {
+                    self.popup = None;
+                }
+            }
+            Message::TogglePopup => {
+                if let Some(popup) = self.popup.take() {
+                    return destroy_popup(popup);
+                }
+                return cosmic::surface::surface_task(cosmic::surface::action::app_popup(
+                    |_| Default::default(),
+                    |app: &mut Self| {
+                        let id = window::Id::unique();
+                        app.popup = Some(id);
+                        let mut settings =
+                            app.core.applet.get_popup_settings(app.core.main_window_id().unwrap(), id, None, None, None);
+                        let Rectangle { x, y, width, height } = app.rectangle;
+                        settings.positioner.anchor_rect = Rectangle::<i32> {
+                            x: x.max(1.0) as i32,
+                            y: y.max(1.0) as i32,
+                            width: width.max(1.0) as i32,
+                            height: height.max(1.0) as i32,
+                        };
+                        settings.positioner.size = None;
+                        settings
+                    },
+                    None,
+                ));
+            }
+            Message::FreeGpu => {
+                // Stops the llama-server, Ollama and vLLM user services and unloads
+                // LM Studio's models; one run at a time, never cut short.
+                if let Some(script) = script_path("free-gpu.sh")
+                    && !FREEING.swap(true, Ordering::SeqCst)
+                {
+                    spawn_detached(vec!["bash".into(), script.into_os_string().into_string().unwrap_or_default()], true);
+                }
+            }
+            Message::OpenBtop => {
+                spawn_detached(vec!["xdg-terminal-exec".into(), "btop".into()], false);
+                if let Some(popup) = self.popup.take() {
+                    return destroy_popup(popup);
+                }
+            }
+        }
+        Task::none()
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        let horizontal = matches!(self.core.applet.anchor, PanelAnchor::Top | PanelAnchor::Bottom);
+        let padding = self.core.applet.suggested_padding(true).0;
+        let button = button::custom(self.panel_content())
+            .padding(if horizontal { [0, padding] } else { [padding, 0] })
+            .on_press_down(Message::TogglePopup)
+            .class(theme::Button::AppletIcon);
+        // Right click: btop.
+        let button = mouse_area(button).on_right_press(Message::OpenBtop);
+        let content: Element<Message> = match self.tracker.as_ref() {
+            Some(tracker) => tracker.container(0, button).ignore_bounds(true).into(),
+            None => button.into(),
+        };
+        autosize::autosize(content, AUTOSIZE_ID.clone()).into()
+    }
+
+    fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
+        let actions = column![
+            divider::horizontal::default(),
+            menu_button(text::body("Free GPU memory")).on_press_maybe(self.active().then_some(Message::FreeGpu)),
+            menu_button(text::body("Open btop")).on_press(Message::OpenBtop),
+        ];
+        let details = scrollable(padded_control(self.details()).padding([12, 16])).height(Length::Shrink);
+        let content = column![container(details).max_height(POPUP_MAX_HEIGHT), actions]
+            .width(Length::Fixed(POPUP_WIDTH))
+            .padding([0, 0, 8, 0]);
+        self.core.applet.popup_container(content).into()
+    }
+
+    fn style(&self) -> Option<cosmic::iced::theme::Style> {
+        Some(cosmic::applet::style())
+    }
+}
+
+// ------------------------------------------------------------------------- processes
+
+// Next to the binary (installed: ../share/maprisma-llm-monitor/scripts), or in
+// the data home; LLM_MONITOR_SCRIPTS wins (development).
+fn script_path(name: &str) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::var_os("LLM_MONITOR_SCRIPTS") {
+        dirs.push(dir.into());
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(bin) = exe.parent()
+    {
+        dirs.push(bin.join("../share/maprisma-llm-monitor/scripts"));
+    }
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    if let Some(data) = data_home {
+        dirs.push(data.join("maprisma-llm-monitor/scripts"));
+    }
+    dirs.push("/usr/share/maprisma-llm-monitor/scripts".into());
+    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+}
+
+// Streams the collector's snapshots; starts it again RESTART_DELAY after it exits.
+async fn run_collector(output: &mut mpsc::Sender<Message>) {
+    loop {
+        if let Some(script) = script_path("llm-monitor.py") {
+            let child = tokio::process::Command::new("python3")
+                .arg("-I")
+                .arg(&script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn();
+            if let Ok(mut child) = child {
+                if let Some(stdout) = child.stdout.take() {
+                    let mut lines = BufReader::new(stdout).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        // A partial line while the collector exits is skipped.
+                        if let Ok(stats) = serde_json::from_str::<Value>(&line)
+                            && stats.get("error").is_none()
+                            && output.send(Message::Stats(stats)).await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                let _ = child.kill().await;
+            }
+        }
+        tokio::time::sleep(RESTART_DELAY).await;
+    }
+}
+
+// Runs argv without waiting for it; a thread reaps it. free_gpu: clears the
+// one-run-at-a-time flag once it ends.
+fn spawn_detached(argv: Vec<String>, free_gpu: bool) {
+    let child = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match child {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+                if free_gpu {
+                    FREEING.store(false, Ordering::SeqCst);
+                }
+            });
+        }
+        Err(_) => {
+            if free_gpu {
+                FREEING.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+}
