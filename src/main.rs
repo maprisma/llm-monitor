@@ -9,7 +9,9 @@
 // seconds. It only reads /proc, sysfs and the runtimes' local APIs; it never
 // starts or stops a runtime.
 
-use std::path::PathBuf;
+use maprisma_llm_monitor::script_path;
+use cosmic::app::ApplicationExt;
+mod window_mode;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,7 +45,16 @@ const POPUP_MAX_HEIGHT: f32 = 760.0;
 static FREEING: AtomicBool = AtomicBool::new(false);
 
 fn main() -> cosmic::iced::Result {
-    cosmic::applet::run::<Monitor>(())
+    if std::env::args().any(|arg| arg == "--window") {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1).enable_all().build().expect("D-Bus runtime");
+        let Some(_connection) = runtime.block_on(window_mode::claim()).expect("Window D-Bus connection") else { return Ok(()) };
+        cosmic::app::run::<Monitor<true>>(cosmic::app::Settings::default()
+            .size(cosmic::iced::Size::new(POPUP_WIDTH, POPUP_MAX_HEIGHT + 100.0))
+            .resizable(Some(8.0)).transparent(false).is_daemon(false), ())
+    } else {
+        cosmic::applet::run::<Monitor<false>>(())
+    }
 }
 
 // ------------------------------------------------------------------------- formatting
@@ -277,8 +288,9 @@ fn section<'a>(title: &'static str) -> Element<'a, Message> {
 // ------------------------------------------------------------------------- applet
 
 #[derive(Default)]
-struct Monitor {
+struct Monitor<const WINDOW_MODE: bool> {
     core: Core,
+    window_mode: bool,
     popup: Option<window::Id>,
     rectangle: Rectangle,
     tracker: Option<RectangleTracker<u32>>,
@@ -295,9 +307,10 @@ enum Message {
     FreeGpu,
     OpenBtop,
     Pulse,
+    CheckClose,
 }
 
-impl Monitor {
+impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
     fn active(&self) -> bool {
         self.stats.get("active").and_then(Value::as_bool) == Some(true)
     }
@@ -609,11 +622,14 @@ impl Monitor {
     }
 }
 
-impl cosmic::Application for Monitor {
+impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     type Executor = cosmic::SingleThreadExecutor;
     type Flags = ();
     type Message = Message;
-    const APP_ID: &'static str = APP_ID;
+    // Wayland associates the window with its launcher entry and icon by this ID.
+    const APP_ID: &'static str = if WINDOW_MODE {
+        "io.github.ubruckhaus.CosmicMaprismaLlmMonitor.Window"
+    } else { APP_ID };
 
     fn core(&self) -> &Core {
         &self.core
@@ -624,7 +640,14 @@ impl cosmic::Application for Monitor {
     }
 
     fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
-        (Self { core, ..Default::default() }, Task::none())
+        let window_mode = WINDOW_MODE;
+        let mut app = Self { core, window_mode, ..Default::default() };
+        let task = if window_mode {
+            app.set_header_title("Maprisma LLM Monitor".into());
+            let id = app.core.main_window_id().unwrap();
+            app.set_window_title("Maprisma LLM Monitor".into(), id)
+        } else { Task::none() };
+        (app, task)
     }
 
     fn on_close_requested(&self, id: window::Id) -> Option<Message> {
@@ -633,13 +656,18 @@ impl cosmic::Application for Monitor {
 
     fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
-            rectangle_tracker_subscription(0).map(|update| Message::Rectangle(update.1)),
             Subscription::run_with("llm-monitor-collector", |_| {
                 stream::channel(4, |mut output| async move {
                     run_collector(&mut output).await;
                 })
             }),
         ];
+        if self.window_mode {
+            subscriptions.push(cosmic::iced::time::every(Duration::from_millis(150)).map(|_| Message::CheckClose));
+        }
+        if !self.window_mode {
+            subscriptions.insert(0, rectangle_tracker_subscription(0).map(|update| Message::Rectangle(update.1)));
+        }
         if self.busy() {
             subscriptions.push(cosmic::iced::time::every(Duration::from_millis(650)).map(|_| Message::Pulse));
         }
@@ -648,6 +676,9 @@ impl cosmic::Application for Monitor {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::CheckClose => {
+                if window_mode::CLOSE.load(Ordering::Relaxed) { return cosmic::iced::exit(); }
+            }
             Message::Stats(stats) => {
                 self.stats = stats;
                 if !self.busy() {
@@ -665,6 +696,7 @@ impl cosmic::Application for Monitor {
                 }
             }
             Message::TogglePopup => {
+                if self.window_mode { return Task::none(); }
                 if let Some(popup) = self.popup.take() {
                     return destroy_popup(popup);
                 }
@@ -708,6 +740,7 @@ impl cosmic::Application for Monitor {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if self.window_mode { return self.popup_content(); }
         let horizontal = matches!(self.core.applet.anchor, PanelAnchor::Top | PanelAnchor::Bottom);
         let padding = self.core.applet.suggested_padding(true).0;
         let button = button::custom(self.panel_content())
@@ -724,46 +757,32 @@ impl cosmic::Application for Monitor {
     }
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
+        if self.window_mode { return self.popup_content(); }
+        self.core.applet.popup_container(self.popup_content()).into()
+    }
+
+    fn style(&self) -> Option<cosmic::iced::theme::Style> {
+        if self.window_mode { None } else { Some(cosmic::applet::style()) }
+    }
+}
+
+impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
+    fn popup_content(&self) -> Element<'_, Message> {
         let actions = column![
             divider::horizontal::default(),
             menu_button(text::body("Free GPU memory")).on_press_maybe(self.active().then_some(Message::FreeGpu)),
             menu_button(text::body("Open btop")).on_press(Message::OpenBtop),
         ];
-        let details = scrollable(padded_control(self.details()).padding([12, 16])).height(Length::Shrink);
+        let detail_content = if self.window_mode { container(self.details()).padding([12, 16]).width(Length::Fill) } else { padded_control(self.details()).padding([12, 16]) };
+        let details = scrollable(detail_content).height(if self.window_mode { Length::Fill } else { Length::Shrink });
         let content = column![container(details).max_height(POPUP_MAX_HEIGHT), actions]
-            .width(Length::Fixed(POPUP_WIDTH))
+            .width(if self.window_mode { Length::Fill } else { Length::Fixed(POPUP_WIDTH) })
             .padding([0, 0, 8, 0]);
-        self.core.applet.popup_container(content).into()
-    }
-
-    fn style(&self) -> Option<cosmic::iced::theme::Style> {
-        Some(cosmic::applet::style())
+        content.into()
     }
 }
 
 // ------------------------------------------------------------------------- processes
-
-// Next to the binary (installed: ../share/maprisma-llm-monitor/scripts), or in
-// the data home; LLM_MONITOR_SCRIPTS wins (development).
-fn script_path(name: &str) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = std::env::var_os("LLM_MONITOR_SCRIPTS") {
-        dirs.push(dir.into());
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(bin) = exe.parent()
-    {
-        dirs.push(bin.join("../share/maprisma-llm-monitor/scripts"));
-    }
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
-    if let Some(data) = data_home {
-        dirs.push(data.join("maprisma-llm-monitor/scripts"));
-    }
-    dirs.push("/usr/share/maprisma-llm-monitor/scripts".into());
-    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
-}
 
 // Streams the collector's snapshots; starts it again RESTART_DELAY after it exits.
 async fn run_collector(output: &mut mpsc::Sender<Message>) {

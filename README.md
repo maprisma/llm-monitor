@@ -28,7 +28,7 @@ Studio keeps running and unloads its models.
 
 ## Install
 
-Needs `python3` (standard library only), Rust (cargo) and COSMIC. btop is optional.
+Needs `python3` (standard library only), Rust (cargo), and COSMIC or KDE Plasma. btop is optional.
 
 ```sh
 ./install.sh
@@ -43,3 +43,22 @@ env -u DISPLAY -u WAYLAND_DISPLAY python3 -m unittest discover -s tests
 ```
 
 MIT license.
+
+## KDE Plasma
+
+On KDE Plasma 6.8 (Wayland), run `./install.sh`, then open **Maprisma LLM Monitor**
+from the application launcher. `maprisma-llm-monitor --window` opens the same details
+and actions as the COSMIC popup in a resizable window. Only one window runs per session.
+The window uses the installed application's icon and title.
+
+The installer also installs `maprisma-llm-monitor-tray` and a KDE-only autostart entry
+(`~/.config/autostart/io.github.ubruckhaus.CosmicMaprismaLlmMonitor.Tray.desktop`,
+or under `$XDG_CONFIG_HOME`). Start the tray manually for the current session, or log
+out and back in. Left click toggles the window; the menu offers **Open Maprisma LLM
+Monitor** and **Quit tray**. Quitting the tray leaves an open window running. The tray
+reconnects when Plasma's StatusNotifierWatcher restarts and allows only one tray per
+session. Its tooltip shows the panel's memory/context text, or “No local model loaded”.
+It runs the same lightweight streaming collector, without polling extra services.
+The COSMIC panel applet and shared scripts remain unchanged.
+
+Rust checks: `cargo test` and `cargo build --release --offline`.
