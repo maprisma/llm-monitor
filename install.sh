@@ -40,6 +40,13 @@ cat > "$data/applications/$id.Window.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Maprisma LLM Monitor
+Name[de]=Maprisma LLM Monitor
+Name[fr]=Maprisma LLM Monitor
+Name[es]=Maprisma LLM Monitor
+Name[it]=Maprisma LLM Monitor
+Name[pt]=Maprisma LLM Monitor
+Name[nl]=Maprisma LLM Monitor
+Name[pl]=Maprisma LLM Monitor
 Exec=$app_exec --window
 Icon=$id-symbolic
 Terminal=false
@@ -50,6 +57,13 @@ cat > "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/$id.Tray.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Maprisma LLM Monitor tray
+Name[de]=Maprisma LLM Monitor im Systembereich
+Name[fr]=Icône de notification Maprisma LLM Monitor
+Name[es]=Bandeja de Maprisma LLM Monitor
+Name[it]=Area di notifica di Maprisma LLM Monitor
+Name[pt]=Bandeja do Maprisma LLM Monitor
+Name[nl]=Maprisma LLM Monitor in het systeemvak
+Name[pl]=Zasobnik Maprisma LLM Monitor
 Exec=$tray_exec
 Icon=$id-symbolic
 Terminal=false

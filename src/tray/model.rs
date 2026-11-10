@@ -1,9 +1,11 @@
+use maprisma_llm_monitor::i18n::{tr, language_options};
 use serde_json::Value;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     Open,
     Activate,
     Quit,
+    Language(usize),
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
@@ -37,17 +39,20 @@ pub fn menu() -> Item {
     };
     let mut root = item(0, "", None);
     root.children = vec![
-        item(1, "Open Maprisma LLM Monitor", Some(Action::Open)),
-        item(2, "Quit tray", Some(Action::Quit)),
+        item(1, &tr("Open Maprisma LLM Monitor"), Some(Action::Open)),
+        item(2, &tr("Quit tray"), Some(Action::Quit)),
     ];
+    let mut languages = item(3, &tr("Language"), None);
+    languages.children = language_options().into_iter().enumerate().map(|(index, (_, label))| item(10 + index as i32, &label, Some(Action::Language(index)))).collect();
+    root.children.push(languages);
     root
 }
 pub fn tooltip(stats: &Value) -> String {
     if stats.get("error").is_some() {
-        return "Waiting for the collector…".into();
+        return tr("Waiting for the collector…");
     }
     if stats["active"].as_bool() != Some(true) {
-        return "No local model loaded".into();
+        return tr("No local model loaded");
     }
     let number = |v: &Value| v.as_f64().filter(|v| v.is_finite()).unwrap_or(0.0);
     let mut text = format!(
@@ -75,7 +80,7 @@ mod tests {
     #[test]
     fn menu_actions() {
         let m = menu();
-        assert_eq!(m.children.len(), 2);
+        assert_eq!(m.children.len(), 3);
         assert_eq!(m.find(1).unwrap().label, "Open Maprisma LLM Monitor");
         assert_eq!(m.activate(1), Some(Action::Open));
         assert_eq!(m.activate(2), Some(Action::Quit));

@@ -62,3 +62,18 @@ It runs the same lightweight streaming collector, without polling extra services
 The COSMIC panel applet and shared scripts remain unchanged.
 
 Rust checks: `cargo test` and `cargo build --release --offline`.
+
+Interface language follows the first non-empty `LC_ALL`, `LC_MESSAGES`, or
+`LANG` value, falling back to English for unknown languages. Choose **Language**
+in the applet popup, window, or tray menu to select System or one of the eight
+built-in languages. Changes apply immediately (other running interfaces refresh
+with their next collector update). The setting is saved in
+`$XDG_CONFIG_HOME/maprisma-llm-monitor/config.json`, or
+`~/.config/maprisma-llm-monitor/config.json` by default.
+
+The English-key catalogs in `translations/` were imported from the read-only
+Omarchy `I18n.js`; port-specific strings live in `translations/extra/`.
+After editing catalogs, run `tools/gen-translations` to refresh the Rust assets
+compiled into both binaries. No translations are downloaded. Check coverage
+with `python3 -m unittest discover -s tests -p test_translations.py` and locale
+fallback with `cargo test --offline`.

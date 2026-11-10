@@ -9,7 +9,7 @@
 // seconds. It only reads /proc, sysfs and the runtimes' local APIs; it never
 // starts or stops a runtime.
 
-use maprisma_llm_monitor::script_path;
+use maprisma_llm_monitor::{script_path, i18n::{tr, trf, language_options, set_language}};
 use cosmic::app::ApplicationExt;
 mod window_mode;
 use std::process::Stdio;
@@ -45,6 +45,13 @@ const POPUP_MAX_HEIGHT: f32 = 760.0;
 static FREEING: AtomicBool = AtomicBool::new(false);
 
 fn main() -> cosmic::iced::Result {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|s| s == "--notify") {
+        if let (Some(title), Some(body)) = (args.get(2), args.get(3)) {
+            maprisma_llm_monitor::i18n::notify(title, body);
+        }
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--window") {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1).enable_all().build().expect("D-Bus runtime");
@@ -114,9 +121,9 @@ fn ctx_text(value: f64) -> String {
     if value <= 0.0 {
         String::new()
     } else if value >= 1024.0 {
-        format!("{}k ctx", (value / 1024.0).round())
+        trf("{0} ctx", &[format!("{}k", (value / 1024.0).round())])
     } else {
-        format!("{value} ctx")
+        trf("{0} ctx", &[value.to_string()])
     }
 }
 
@@ -138,18 +145,18 @@ fn models(runtime: &Value) -> &[Value] {
 fn runtime_state(runtime: &Value) -> String {
     if runtime.get("running").and_then(Value::as_bool) != Some(true) {
         return if runtime.get("installed").and_then(Value::as_bool) == Some(false) {
-            "not installed".into()
+            tr("not installed")
         } else {
-            "stopped".into()
+            tr("stopped")
         };
     }
     let all = models(runtime);
     let resident = all.iter().filter(|m| s(m, "state") != "sleeping").count();
     match resident {
-        1 => "1 model loaded".into(),
-        0 if !all.is_empty() => "model sleeping (GPU free)".into(),
-        0 => "running, no model".into(),
-        count => format!("{count} models loaded"),
+        1 => tr("1 model loaded"),
+        0 if !all.is_empty() => tr("model sleeping (GPU free)"),
+        0 => tr("running, no model"),
+        count => trf("{0} models loaded", &[count.to_string()]),
     }
 }
 
@@ -254,7 +261,7 @@ fn swatch<'a>(class: theme::Container<'static>) -> Element<'a, Message> {
 // Swatch, name, amount; an optional note below and an optional level bar.
 fn legend<'a>(
     swatch_class: theme::Container<'static>,
-    name: &'static str,
+    name: String,
     amount: String,
     note: String,
     fraction: Option<f64>,
@@ -279,7 +286,7 @@ fn legend<'a>(
     block.into()
 }
 
-fn section<'a>(title: &'static str) -> Element<'a, Message> {
+fn section<'a>(title: String) -> Element<'a, Message> {
     container(text::caption_heading(title.to_uppercase()).class(theme::Text::Custom(dim_text)))
         .padding([8, 0, 0, 0])
         .into()
@@ -296,6 +303,8 @@ struct Monitor<const WINDOW_MODE: bool> {
     tracker: Option<RectangleTracker<u32>>,
     stats: Value,
     pulse_dim: bool,
+    language_open: bool,
+    language_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +317,8 @@ enum Message {
     OpenBtop,
     Pulse,
     CheckClose,
+    Language(String),
+    ToggleLanguage,
 }
 
 impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
@@ -401,6 +412,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             }
             let state = s(model, "state");
             if !state.is_empty() && state != "loaded" {
+                let state = match state { "sleeping" => tr("sleeping"), "loading" => tr("loading"), "unloaded" => tr("unloaded"), _ => state.to_string() };
                 title += &format!("  ·  {state}");
             }
             block = block.push(container(text::caption(title)).padding([0, 0, 0, 16]));
@@ -408,8 +420,8 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             // Tokens in the context window, and the VRAM reserved for it (KV cache).
             let fraction = used / context;
             let memory = n(model, "context_memory");
-            let caption = if memory > 0.0 { format!("Context  ·  {} VRAM", mib(memory)) } else { "Context".into() };
-            let value = format!("{} / {} tokens ({}%)", tokens(used), tokens(context), (fraction * 100.0).round());
+            let caption = if memory > 0.0 { format!("{}  ·  {}", tr("Context"), trf("{0} VRAM", &[mib(memory)])) } else { tr("Context") };
+            let value = trf("{0} / {1} tokens ({2}%)", &[tokens(used), tokens(context), (fraction * 100.0).round().to_string()]);
             let value: Element<Message> = if fraction >= 0.9 {
                 text::caption(value).class(theme::Text::Color(level_color(fraction))).into()
             } else {
@@ -426,12 +438,12 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             let spilled = n(runtime, "spilled");
             let mut details = vec![
                 format!(
-                    "VRAM {} GiB{}",
-                    gib(n(runtime, "vram")),
-                    if spilled > SPILL_SHOWN { format!(" (+{} GiB in RAM)", gib(spilled)) } else { String::new() }
+                    "{}{}",
+                    trf("VRAM {0} GiB", &[gib(n(runtime, "vram"))]),
+                    if spilled > SPILL_SHOWN { format!(" {}", trf("(+{0} GiB in RAM)", &[gib(spilled)])) } else { String::new() }
                 ),
-                format!("CPU {}", pct(num(runtime, "cpu"))),
-                format!("RAM {} GiB", gib(n(runtime, "memory"))),
+                format!("{} {}", tr("CPU"), pct(num(runtime, "cpu"))),
+                trf("RAM {0} GiB", &[gib(n(runtime, "memory"))]),
             ];
             let clients: Vec<&str> = runtime
                 .get("clients")
@@ -439,7 +451,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
                 .map(|c| c.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
             if !clients.is_empty() {
-                details.push(format!("used by {}", clients.join(", ")));
+                details.push(trf("used by {0}", &[clients.join(", ")]));
             }
             block = block.push(container(dim(details.join("  ·  "))).padding([0, 0, 0, 16]));
         }
@@ -463,12 +475,12 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
                 let model = s(p, "model");
                 if model.is_empty() { s(p, "runtime").to_string() } else { format!("{} · {model}", s(p, "runtime")) }
             }
-            None => "No local model loaded".into(),
+            None => tr("No local model loaded"),
         };
-        let pill = if self.busy() { "generating" } else if self.active() { "idle" } else { "" };
+        let pill = if self.busy() { tr("generating") } else if self.active() { tr("idle") } else { String::new() };
         let mut header = row![
             icon::from_name(ICON).size(32).symbolic(true).icon(),
-            column![text::title4("Maprisma LLM Monitor"), dim(meta)].spacing(2),
+            column![text::title4(tr("Maprisma LLM Monitor")), dim(meta)].spacing(2),
             space::horizontal().width(Length::Fill),
         ]
         .spacing(12)
@@ -480,12 +492,12 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         let mut content = column![header, divider::horizontal::default()].spacing(8);
 
         // GPU memory: total, one stacked bar (LLM / desktop & apps / free), legend.
-        content = content.push(section("GPU memory"));
+        content = content.push(section(tr("GPU memory")));
         content = content.push(
             row![
-                text::heading(format!("{} of {} GiB in use", gib(n(gpu, "vram_used")), gib(total))),
+                text::heading(trf("{0} of {1} GiB in use", &[gib(n(gpu, "vram_used")), gib(total)])),
                 space::horizontal().width(Length::Fill),
-                dim(format!("{} GiB free", gib(free))),
+                dim(trf("{0} GiB free", &[gib(free)])),
             ]
             .align_y(Alignment::Center),
         );
@@ -498,9 +510,9 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         ));
         content = content.push(legend(
             accent_fill(3.0),
-            "LLM models",
+            tr("LLM models"),
             format!("{} GiB", gib(n(stats, "llm_vram"))),
-            "↑ this number is shown in the bar".into(),
+            tr("↑ this number is shown in the bar"),
             None,
         ));
 
@@ -512,13 +524,13 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             let memory = n(p, "context_memory");
             content = content.push(legend(
                 fill(level_color(filled), 3.0),
-                "Context buffer",
+                tr("Context buffer"),
                 if memory > 0.0 {
-                    format!("≈ {} of {}", mib(memory * filled), mib(memory))
+                    trf("≈ {0} of {1}", &[mib(memory * filled), mib(memory)])
                 } else {
                     format!("{}%", (filled * 100.0).round())
                 },
-                format!("{} / {} tokens ({}%)", tokens(used), tokens(context), (filled * 100.0).round()),
+                trf("{0} / {1} tokens ({2}%)", &[tokens(used), tokens(context), (filled * 100.0).round().to_string()]),
                 Some(filled),
             ));
         }
@@ -527,17 +539,16 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             let used = n(p, "output_used");
             let filled = used / limit;
             let memory = n(p, "context_memory");
-            let counts = format!("{} / {} tokens ({}%)", tokens(used), tokens(limit), (filled * 100.0).round());
             let generating = p.get("generating").and_then(Value::as_bool) == Some(true);
             content = content.push(legend(
                 fill(level_color(filled), 3.0),
-                "Output buffer",
+                tr("Output buffer"),
                 if memory > 0.0 && context > 0.0 {
                     format!("≈ {}", mib(memory * used / context))
                 } else {
                     format!("{}%", (filled * 100.0).round())
                 },
-                if generating { format!("generating {counts}") } else { format!("last reply {counts}") },
+                if generating { trf("generating {0} / {1} tokens ({2}%)", &[tokens(used), tokens(limit), (filled * 100.0).round().to_string()]) } else { trf("last reply {0} / {1} tokens ({2}%)", &[tokens(used), tokens(limit), (filled * 100.0).round().to_string()]) },
                 Some(filled),
             ));
         }
@@ -548,26 +559,22 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             .unwrap_or_default();
         content = content.push(legend(
             neutral_fill(3.0),
-            "Desktop & apps",
+            tr("Desktop & apps"),
             format!("{} GiB", gib(n(stats, "other_vram"))),
             apps.join(" · "),
             None,
         ));
-        content = content.push(legend(track(3.0), "Free", format!("{} GiB", gib(free)), String::new(), None));
+        content = content.push(legend(track(3.0), tr("Free"), format!("{} GiB", gib(free)), String::new(), None));
         let spilled = n(stats, "llm_spilled");
         if spilled > SPILL_SHOWN {
             content = content.push(
-                text::caption(format!(
-                    "⚠ {} GiB of model memory does not fit in VRAM and was moved to system RAM. \
-                     Generation is much slower; unload other models or free GPU memory.",
-                    gib(spilled)
-                ))
+                text::caption(trf("⚠ {0} GiB of model memory does not fit in VRAM and was moved to system RAM. Generation is much slower; unload other models or free GPU memory.", &[gib(spilled)]))
                 .class(theme::Text::Color(level_color(0.8))),
             );
         }
 
         // GPU activity and generation speed.
-        content = content.push(section("GPU activity"));
+        content = content.push(section(tr("GPU activity")));
         let mut load = pct(num(gpu, "busy"));
         if let Some(temp) = num(gpu, "temp").filter(|t| *t > 0.0) {
             load += &format!("  ·  {} °C", temp.round());
@@ -575,48 +582,48 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         if let Some(power) = num(gpu, "power").filter(|w| *w > 0.0) {
             load += &format!("  ·  {} W", power.round());
         }
-        content = content.push(meter("Load".into(), load, n(gpu, "busy") / 100.0));
+        content = content.push(meter(tr("Load"), load, n(gpu, "busy") / 100.0));
         if let Some(speed) = p.get("speed").filter(|v| v.is_object()) {
             let avg = num(speed, "avg");
             let max = num(speed, "max");
             let now = num(speed, "now");
             let stat = if n(speed, "count") > 0.0 {
-                format!("  ·  min {}  avg {}  max {}", rate(num(speed, "min")), rate(avg), rate(max))
+                format!("  ·  {}", trf("min {0}  avg {1}  max {2}", &[rate(num(speed, "min")), rate(avg), rate(max)]))
             } else if avg.is_some_and(|a| a > 0.0) {
-                format!("  ·  avg {} since load", rate(avg))
+                format!("  ·  {}", trf("avg {0} since load", &[rate(avg)]))
             } else {
                 String::new()
             };
             let value = match now {
-                Some(v) => format!("{} tok/s", rate(Some(v))),
-                None if avg.is_some_and(|a| a > 0.0) => "idle".into(),
+                Some(v) => trf("{0} tok/s", &[rate(Some(v))]),
+                None if avg.is_some_and(|a| a > 0.0) => tr("idle"),
                 None => String::new(),
             };
             let fraction = match now {
                 Some(v) if v > 0.0 => v / v.max(max.unwrap_or(0.0)),
                 _ => 0.0,
             };
-            content = content.push(meter(format!("Speed{stat}"), value, fraction));
+            content = content.push(meter(format!("{}{stat}", tr("Speed")), value, fraction));
         }
 
-        content = content.push(section("System"));
-        content = content.push(meter("CPU".into(), pct(num(system, "cpu")), n(system, "cpu") / 100.0));
+        content = content.push(section(tr("System")));
+        content = content.push(meter(tr("CPU"), pct(num(system, "cpu")), n(system, "cpu") / 100.0));
         let mem_total = n(system, "mem_total");
         content = content.push(meter(
-            "RAM".into(),
+            tr("RAM"),
             format!("{} / {} GiB", gib(n(system, "mem_used")), gib(mem_total)),
             if mem_total > 0.0 { n(system, "mem_used") / mem_total } else { 0.0 },
         ));
 
         // One block per runtime.
         content = content.push(divider::horizontal::default());
-        content = content.push(section("Runtimes"));
+        content = content.push(section(tr("Runtimes")));
         if let Some(runtimes) = stats.get("runtimes").and_then(Value::as_array) {
             for runtime in runtimes {
                 content = content.push(self.runtime_block(runtime));
             }
         } else {
-            content = content.push(dim("Waiting for the collector…"));
+            content = content.push(dim(tr("Waiting for the collector…")));
         }
         content.spacing(8).into()
     }
@@ -643,9 +650,9 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
         let window_mode = WINDOW_MODE;
         let mut app = Self { core, window_mode, ..Default::default() };
         let task = if window_mode {
-            app.set_header_title("Maprisma LLM Monitor".into());
+            app.set_header_title(tr("Maprisma LLM Monitor"));
             let id = app.core.main_window_id().unwrap();
-            app.set_window_title("Maprisma LLM Monitor".into(), id)
+            app.set_window_title(tr("Maprisma LLM Monitor"), id)
         } else { Task::none() };
         (app, task)
     }
@@ -676,6 +683,8 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Language(code) => { self.language_error = set_language(&code).is_err(); self.language_open = false; }
+            Message::ToggleLanguage => self.language_open = !self.language_open,
             Message::CheckClose => {
                 if window_mode::CLOSE.load(Ordering::Relaxed) { return cosmic::iced::exit(); }
             }
@@ -768,11 +777,19 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
 
 impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
     fn popup_content(&self) -> Element<'_, Message> {
-        let actions = column![
+        let mut actions = column![
             divider::horizontal::default(),
-            menu_button(text::body("Free GPU memory")).on_press_maybe(self.active().then_some(Message::FreeGpu)),
-            menu_button(text::body("Open btop")).on_press(Message::OpenBtop),
+            menu_button(text::body(tr("Free GPU memory"))).on_press_maybe(self.active().then_some(Message::FreeGpu)),
+            menu_button(text::body(tr("Open btop"))).on_press(Message::OpenBtop),
         ];
+        actions = actions.push(menu_button(text::body(tr("Language"))).on_press(Message::ToggleLanguage));
+        if self.language_error { actions = actions.push(text::body(tr("Could not save the language setting."))); }
+        if self.language_open {
+            for (code, label) in language_options() {
+                actions = actions.push(menu_button(text::body(label)).on_press(Message::Language(code)));
+            }
+            return scrollable(container(actions).padding(8)).height(Length::Fixed(460.0)).into();
+        }
         let detail_content = if self.window_mode { container(self.details()).padding([12, 16]).width(Length::Fill) } else { padded_control(self.details()).padding([12, 16]) };
         let details = scrollable(detail_content).height(if self.window_mode { Length::Fill } else { Length::Shrink });
         let content = column![container(details).max_height(POPUP_MAX_HEIGHT), actions]
@@ -819,7 +836,11 @@ async fn run_collector(output: &mut mpsc::Sender<Message>) {
 // Runs argv without waiting for it; a thread reaps it. free_gpu: clears the
 // one-run-at-a-time flag once it ends.
 fn spawn_detached(argv: Vec<String>, free_gpu: bool) {
-    let child = std::process::Command::new(&argv[0])
+    let mut command = std::process::Command::new(&argv[0]);
+    if free_gpu {
+        if let Ok(exe) = std::env::current_exe() { command.env("MAPRISMA_NOTIFY", exe); }
+    }
+    let child = command
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

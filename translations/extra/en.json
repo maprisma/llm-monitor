@@ -1,0 +1,21 @@
+{
+  "Maprisma LLM Monitor": "Maprisma LLM Monitor",
+  "CPU": "CPU",
+  "RAM": "RAM",
+  "Open btop": "Open btop",
+  "Open Maprisma LLM Monitor": "Open Maprisma LLM Monitor",
+  "Quit tray": "Quit tray",
+  "Waiting for the collector…": "Waiting for the collector…",
+  "Unknown menu ID": "Unknown menu ID",
+  "Unknown menu property": "Unknown menu property",
+  "Local LLMs in the panel: GPU memory, context use and runtimes": "Local LLMs in the panel: GPU memory, context use and runtimes",
+  "Maprisma LLM Monitor tray": "Maprisma LLM Monitor tray",
+  "Could not save the language setting.": "Could not save the language setting.",
+  "GPU memory not fully freed": "GPU memory not fully freed",
+  "GPU memory freed": "GPU memory freed",
+  "Nothing to free": "Nothing to free",
+  "Could not stop: {0}.": "Could not stop: {0}.",
+  "Could not check: {0} (systemctl --user did not answer).": "Could not check: {0} (systemctl --user did not answer).",
+  "Stopped: {0}.": "Stopped: {0}.",
+  "No llama-server, Ollama or vLLM user service and no LM Studio models are running. Servers started by hand must be stopped where they run.": "No llama-server, Ollama or vLLM user service and no LM Studio models are running. Servers started by hand must be stopped where they run."
+}

@@ -1,5 +1,5 @@
 mod model;
-use maprisma_llm_monitor::script_path;
+use maprisma_llm_monitor::{script_path, i18n::{tr, set_language, language_options}};
 use model::Action;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -116,7 +116,7 @@ impl Menu {
         let menu = s.menu.clone();
         let item = menu
             .find(parent_id)
-            .ok_or_else(|| zbus::fdo::Error::InvalidArgs("Unknown menu ID".into()))?;
+            .ok_or_else(|| zbus::fdo::Error::InvalidArgs(tr("Unknown menu ID")))?;
         Ok((s.revision, layout(item, recursion_depth, &property_names)))
     }
     async fn get_group_properties(
@@ -138,7 +138,7 @@ impl Menu {
         let menu = s.menu.clone();
         menu.find(id)
             .and_then(|i| properties(i, &[]).remove(&name))
-            .ok_or_else(|| zbus::fdo::Error::InvalidArgs("Unknown menu property".into()))
+            .ok_or_else(|| zbus::fdo::Error::InvalidArgs(tr("Unknown menu property")))
     }
     async fn event(&self, id: i32, event_id: String, _data: OwnedValue, _timestamp: u32) {
         self.dispatch(id, &event_id).await;
@@ -187,8 +187,8 @@ impl Tray {
         "maprisma-llm-monitor"
     }
     #[zbus(property)]
-    fn title(&self) -> &str {
-        "Maprisma LLM Monitor"
+    fn title(&self) -> String {
+        tr("Maprisma LLM Monitor")
     }
     #[zbus(property)]
     async fn status(&self) -> &str {
@@ -231,7 +231,7 @@ impl Tray {
         (
             ICON.into(),
             vec![],
-            "Maprisma LLM Monitor".into(),
+            tr("Maprisma LLM Monitor"),
             self.state.lock().await.tooltip(),
         )
     }
@@ -307,7 +307,7 @@ async fn collect(tx: mpsc::Sender<String>) {
                 let _ = child.kill().await;
             }
         }
-        if tx.send("Waiting for the collector…".into()).await.is_err() {
+        if tx.send(tr("Waiting for the collector…")).await.is_err() {
             return;
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -318,7 +318,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial = State {
         menu: model::menu(),
         revision: 1,
-        tooltip: "Waiting for the collector…".into(),
+        tooltip: tr("Waiting for the collector…"),
     };
     let state = Arc::new(Mutex::new(initial));
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -399,6 +399,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             Some(tooltip) = stats_rx.recv() => {
                 let mut s = state.lock().await;
+                let menu = model::menu();
+                if s.menu != menu {
+                    s.menu = menu; s.revision += 1;
+                    Menu::layout_updated(&SignalEmitter::new(&connection, "/MenuBar")?, s.revision, 0).await?;
+                }
                 if s.tooltip != tooltip {
                     s.tooltip = tooltip;
                     drop(s);
@@ -406,6 +411,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Some(action) = rx.recv() => match action {
+                Action::Language(index) => {
+                    if let Some((code, _)) = language_options().get(index) {
+                        if set_language(code).is_err() {
+                            state.lock().await.tooltip = tr("Could not save the language setting.");
+                            Tray::new_tool_tip(&SignalEmitter::new(&connection, "/StatusNotifierItem")?).await?;
+                            continue;
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.menu = model::menu(); s.revision += 1;
+                    Menu::layout_updated(&SignalEmitter::new(&connection, "/MenuBar")?, s.revision, 0).await?;
+                }
                 Action::Quit => { collector.abort(); return Ok(()); }
                 Action::Open => window_action(false, &connection).await,
                 Action::Activate => window_action(true, &connection).await,
@@ -427,7 +444,7 @@ mod tests {
             "(ia{sv}av)"
         );
         assert!(layout(&menu, 0, &[]).2.is_empty());
-        assert_eq!(layout(&menu, 1, &[]).2.len(), 2);
+        assert_eq!(layout(&menu, 1, &[]).2.len(), 3);
         assert_eq!(
             properties(menu.find(1).unwrap(), &["label".into()]).len(),
             1
