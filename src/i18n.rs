@@ -24,9 +24,21 @@ fn read_setting() -> String {
 }
 pub fn set_language(code: &str) -> std::io::Result<()> {
     if code != "auto" && !LANGUAGES.iter().any(|(c, _)| *c == code) { return Ok(()); }
+    write_pref("language", Some(code.into()))
+}
+/// One interface setting from config.json (language, screenshot_key, corners).
+pub fn read_pref(key: &str) -> Option<Value> {
+    std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.get(key).cloned())
+}
+/// Sets (Some) or removes (None) one setting; the other keys stay as they are.
+pub fn write_pref(key: &str, value: Option<Value>) -> std::io::Result<()> {
     let path = config_path();
     let mut config = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).filter(Value::is_object).unwrap_or_else(|| serde_json::json!({}));
-    config["language"] = code.into();
+    match value {
+        Some(value) => config[key] = value,
+        None => { config.as_object_mut().map(|o| o.remove(key)); }
+    }
     std::fs::create_dir_all(path.parent().unwrap())?;
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&temporary, serde_json::to_vec_pretty(&config)?)?;

@@ -17,5 +17,18 @@
   "Could not stop: {0}.": "Nie udało się zatrzymać: {0}.",
   "Could not check: {0} (systemctl --user did not answer).": "Nie udało się sprawdzić: {0} (systemctl --user nie odpowiedział).",
   "Stopped: {0}.": "Zatrzymano: {0}.",
-  "No llama-server, Ollama or vLLM user service and no LM Studio models are running. Servers started by hand must be stopped where they run.": "Nie działają żadne usługi użytkownika llama-server, Ollama ani vLLM ani modele LM Studio. Serwery uruchomione ręcznie trzeba zatrzymać tam, gdzie działają."
+  "No llama-server, Ollama or vLLM user service and no LM Studio models are running. Servers started by hand must be stopped where they run.": "Nie działają żadne usługi użytkownika llama-server, Ollama ani vLLM ani modele LM Studio. Serwery uruchomione ręcznie trzeba zatrzymać tam, gdzie działają.",
+  "F12 saves a screenshot": "F12 zapisuje zrzut ekranu",
+  "Screenshot saved": "Zrzut ekranu zapisany",
+  "Saved as {0}": "Zapisano jako {0}",
+  "What is wrong? (optional)": "Co jest nie tak? (opcjonalnie)",
+  "Done": "Gotowe",
+  "The screenshot could not be saved: {0}": "Nie udało się zapisać zrzutu ekranu: {0}",
+  "The note could not be saved: {0}": "Nie udało się zapisać notatki: {0}",
+  "Corners": "Narożniki",
+  "Like the desktop ({0} px)": "Jak pulpit ({0} px)",
+  "Slightly rounded ({0} px)": "Lekko zaokrąglone ({0} px)",
+  "Rounded ({0} px)": "Zaokrąglone ({0} px)",
+  "Square": "Proste",
+  "Could not save the setting.": "Nie udało się zapisać ustawienia."
 }

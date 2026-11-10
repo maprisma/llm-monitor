@@ -17,5 +17,18 @@
   "Could not stop: {0}.": "Impossibile fermare: {0}.",
   "Could not check: {0} (systemctl --user did not answer).": "Impossibile verificare: {0} (systemctl --user non ha risposto).",
   "Stopped: {0}.": "Fermato: {0}.",
-  "No llama-server, Ollama or vLLM user service and no LM Studio models are running. Servers started by hand must be stopped where they run.": "Nessun servizio utente llama-server, Ollama o vLLM e nessun modello LM Studio è in esecuzione. I server avviati manualmente vanno fermati dove sono in esecuzione."
+  "No llama-server, Ollama or vLLM user service and no LM Studio models are running. Servers started by hand must be stopped where they run.": "Nessun servizio utente llama-server, Ollama o vLLM e nessun modello LM Studio è in esecuzione. I server avviati manualmente vanno fermati dove sono in esecuzione.",
+  "F12 saves a screenshot": "F12 salva uno screenshot",
+  "Screenshot saved": "Screenshot salvato",
+  "Saved as {0}": "Salvato come {0}",
+  "What is wrong? (optional)": "Cosa non va? (facoltativo)",
+  "Done": "Fatto",
+  "The screenshot could not be saved: {0}": "Impossibile salvare lo screenshot: {0}",
+  "The note could not be saved: {0}": "Impossibile salvare la nota: {0}",
+  "Corners": "Angoli",
+  "Like the desktop ({0} px)": "Come il desktop ({0} px)",
+  "Slightly rounded ({0} px)": "Leggermente arrotondati ({0} px)",
+  "Rounded ({0} px)": "Arrotondati ({0} px)",
+  "Square": "Squadrati",
+  "Could not save the setting.": "Impossibile salvare l'impostazione."
 }
