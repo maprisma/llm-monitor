@@ -67,7 +67,7 @@ Name[pl]=Zasobnik Maprisma LLM Monitor
 Exec=$tray_exec
 Icon=$id-symbolic
 Terminal=false
-OnlyShowIn=KDE;
+OnlyShowIn=KDE;Hyprland;
 EOF
 gtk-update-icon-cache -q -t "$data/icons/hicolor" 2>/dev/null || true
 echo "Installed. Add “Maprisma LLM Monitor” in COSMIC Settings › Desktop › Panel › Applets."
