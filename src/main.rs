@@ -705,7 +705,8 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
         let task = if window_mode {
             app.set_header_title(tr("Maprisma LLM Monitor"));
             let id = app.core.main_window_id().unwrap();
-            app.set_window_title(tr("Maprisma LLM Monitor"), id)
+            // The desktop's theme for the whole window (title bar too), see look.rs.
+            Task::batch([app.set_window_title(tr("Maprisma LLM Monitor"), id), corners::set_app_theme(&app.corners)])
         } else { Task::none() };
         (app, task)
     }
@@ -799,6 +800,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 self.corners = choice.to_string();
                 corners::set_current(choice);
                 self.corners_open = false;
+                if self.window_mode { return corners::set_app_theme(choice); }
             }
             Message::CheckClose => {
                 if window_mode::CLOSE.load(Ordering::Relaxed) { return cosmic::iced::exit(); }
@@ -808,7 +810,14 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 // Settings changed in another interface (window, applet) take effect here too.
                 self.shot_key = shot_key_setting();
                 let corners = corners_setting();
-                if corners != self.corners { corners::set_current(&corners); self.corners = corners; }
+                let mut restyle = corners != self.corners;
+                if restyle { corners::set_current(&corners); self.corners = corners; }
+                // The desktop's colours and corners (Maprisma Theme can change them any time).
+                restyle |= maprisma_llm_monitor::look::refresh();
+                if restyle && self.window_mode {
+                    if !self.busy() { self.pulse_dim = false; }
+                    return corners::set_app_theme(&self.corners);
+                }
                 if !self.busy() {
                     self.pulse_dim = false;
                 }
@@ -874,7 +883,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        if self.window_mode { return corners::apply(&self.corners, self.popup_content()); }
+        if self.window_mode { return corners::apply_window(&self.corners, self.popup_content()); }
         let horizontal = matches!(self.core.applet.anchor, PanelAnchor::Top | PanelAnchor::Bottom);
         let padding = self.core.applet.suggested_padding(true).0;
         let button = button::custom(self.panel_content())
@@ -891,7 +900,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     }
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
-        if self.window_mode { return corners::apply(&self.corners, self.popup_content()); }
+        if self.window_mode { return corners::apply_window(&self.corners, self.popup_content()); }
         corners::apply(&self.corners, self.core.applet.popup_container(self.popup_content()))
     }
 
