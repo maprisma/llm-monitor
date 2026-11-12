@@ -12,6 +12,7 @@
 use maprisma_llm_monitor::{corners, script_path, shot, i18n::{tr, trf, language_options, set_language, read_pref, write_pref}};
 use cosmic::app::ApplicationExt;
 mod window_mode;
+mod window_size;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,11 +61,16 @@ fn main() -> cosmic::iced::Result {
             .worker_threads(1).enable_all().build().expect("D-Bus runtime");
         let Some(_connection) = runtime.block_on(window_mode::claim()).expect("Window D-Bus connection") else { return Ok(()) };
         cosmic::app::run::<Monitor<true>>(cosmic::app::Settings::default()
-            .size(cosmic::iced::Size::new(POPUP_WIDTH, POPUP_MAX_HEIGHT + 100.0))
+            .size({ let (width, height) = window_start_size(); cosmic::iced::Size::new(width, height) })
             .resizable(Some(8.0)).transparent(false).is_daemon(false), ())
     } else {
         cosmic::applet::run::<Monitor<false>>(())
     }
+}
+
+// The `--window` size: the one the user left it at (layout rule 5a), else the popup's.
+fn window_start_size() -> window_size::Size {
+    window_size::parse(read_pref(window_size::KEY).as_ref()).unwrap_or((POPUP_WIDTH, POPUP_MAX_HEIGHT + 100.0))
 }
 
 // ------------------------------------------------------------------------- formatting
@@ -324,10 +330,12 @@ struct Monitor<const WINDOW_MODE: bool> {
     corners: String,
     corners_open: bool,
     setting_error: bool,
+    resize: window_size::Debounce,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
+    SaveSize,
     Stats(Value),
     TogglePopup,
     CloseRequested(window::Id),
@@ -339,7 +347,7 @@ enum Message {
     Language(String),
     ToggleLanguage,
     ShotKey(window::Id),
-    Escape,
+    Escape(window::Id),
     Captured(window::Screenshot),
     ShotSaved(Result<shot::Saved, String>),
     NoteInput(String),
@@ -348,6 +356,32 @@ enum Message {
     SetShotKey(bool),
     ToggleCorners,
     Corners(String),
+}
+
+/// What Esc does (layout rule 5a): the innermost open thing first, then the window or popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscStep {
+    /// Skip the screenshot's note (or close its error).
+    Note,
+    /// Close the open Language / Corners list.
+    Menus,
+    /// Close the window (`--window`) or the popup.
+    Close,
+    Nothing,
+}
+
+/// `note`: the screenshot card shows; `menus`: a list is open; `shown`: Esc came from the
+/// window or the open popup (not the panel button).
+fn esc_step(note: bool, menus: bool, shown: bool) -> EscStep {
+    if !shown {
+        EscStep::Nothing
+    } else if note {
+        EscStep::Note
+    } else if menus {
+        EscStep::Menus
+    } else {
+        EscStep::Close
+    }
 }
 
 // Runs `work` on its own thread (saving must not hold up the popup) and answers with `done`.
@@ -701,6 +735,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
         let window_mode = WINDOW_MODE;
         let mut app = Self { core, window_mode, shot_key: shot_key_setting(), corners: corners_setting(), ..Default::default() };
+        if window_mode { app.resize = window_size::Debounce::new(window_start_size()); }
         corners::set_current(&app.corners);
         let task = if window_mode {
             app.set_header_title(tr("Maprisma LLM Monitor"));
@@ -715,6 +750,12 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
         Some(Message::CloseRequested(id))
     }
 
+    fn on_window_resize(&mut self, id: window::Id, width: f32, height: f32) {
+        if self.window_mode && self.core.main_window_id() == Some(id) {
+            self.resize.resized(width, height, std::time::Instant::now());
+        }
+    }
+
     fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
             Subscription::run_with("llm-monitor-collector", |_| {
@@ -725,14 +766,20 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
         ];
         if self.window_mode {
             subscriptions.push(cosmic::iced::time::every(Duration::from_millis(150)).map(|_| Message::CheckClose));
+            if self.resize.waiting() {
+                subscriptions.push(cosmic::iced::time::every(Duration::from_millis(100)).map(|_| Message::SaveSize));
+            }
         }
-        // F12 (no modifiers) in the popup or window; Esc skips the screenshot's note.
-        subscriptions.push(cosmic::iced::event::listen_with(|event, _, id| match event {
+        // F12 (no modifiers) in the popup or window; Esc closes the innermost thing (esc_step).
+        subscriptions.push(cosmic::iced::event::listen_with(|event, status, id| match event {
             cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 if shot::is_shot_key(&key, modifiers) {
                     Some(Message::ShotKey(id))
-                } else if matches!(key, cosmic::iced::keyboard::Key::Named(cosmic::iced::keyboard::key::Named::Escape)) {
-                    Some(Message::Escape)
+                } else if status == cosmic::iced::event::Status::Ignored
+                    && matches!(key, cosmic::iced::keyboard::Key::Named(cosmic::iced::keyboard::key::Named::Escape))
+                {
+                    // Not one an open drop-down list took to close itself.
+                    Some(Message::Escape(id))
                 } else {
                     None
                 }
@@ -780,8 +827,20 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 }
             }
             Message::NoteDone => return self.finish_note(true),
-            Message::Escape => {
-                if self.shot.open() { return self.finish_note(false); }
+            Message::Escape(id) => {
+                let shown = if self.window_mode { self.core.main_window_id() == Some(id) } else { self.popup == Some(id) };
+                match esc_step(self.shot.open(), self.language_open || self.corners_open, shown) {
+                    EscStep::Note => return self.finish_note(false),
+                    EscStep::Menus => { self.language_open = false; self.corners_open = false; }
+                    // Like the window's own close (the tray keeps running); the popup like a click on the icon.
+                    EscStep::Close if self.window_mode => { self.save_size(true); return cosmic::iced::exit(); }
+                    EscStep::Close => {
+                        if let Some(popup) = self.popup.take() {
+                            return Task::batch([self.popup_closed(), destroy_popup(popup)]);
+                        }
+                    }
+                    EscStep::Nothing => {}
+                }
             }
             Message::NoteSaved(result) => match result {
                 Ok(()) => { if self.shot == shot::Phase::Noting { self.shot = shot::Phase::Idle; } }
@@ -803,8 +862,9 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 if self.window_mode { return corners::set_app_theme(choice); }
             }
             Message::CheckClose => {
-                if window_mode::CLOSE.load(Ordering::Relaxed) { return cosmic::iced::exit(); }
+                if window_mode::CLOSE.load(Ordering::Relaxed) { self.save_size(true); return cosmic::iced::exit(); }
             }
+            Message::SaveSize => self.save_size(false),
             Message::Stats(stats) => {
                 self.stats = stats;
                 // Settings changed in another interface (window, applet) take effect here too.
@@ -828,6 +888,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 RectangleUpdate::Init(tracker) => self.tracker = Some(tracker),
             },
             Message::CloseRequested(id) => {
+                if self.window_mode { self.save_size(true); }
                 if self.popup == Some(id) {
                     self.popup = None;
                     return self.popup_closed();
@@ -930,6 +991,16 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
     }
 
     // A capture still on its way is dropped with its popup; a typed note is kept (saved).
+    // A resize that has settled (or, on `closing`, any waiting one) goes to config.json; not
+    // while maximised, fullscreen or tiled (libcosmic's sharp corners).
+    fn save_size(&mut self, closing: bool) {
+        let ignore = self.core.window.sharp_corners;
+        let size = if closing { self.resize.flush(ignore) } else { self.resize.due(std::time::Instant::now(), ignore) };
+        if let Some(size) = size {
+            self.setting_error = write_pref(window_size::KEY, Some(window_size::to_value(size))).is_err();
+        }
+    }
+
     fn popup_closed(&mut self) -> Task<Message> {
         if std::mem::take(&mut self.capturing) && self.shot == shot::Phase::Busy {
             self.shot = shot::Phase::Idle;
@@ -1073,5 +1144,20 @@ fn spawn_detached(argv: Vec<String>, free_gpu: bool) {
                 FREEING.store(false, Ordering::SeqCst);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn esc_closes_the_innermost_thing_first() {
+        assert_eq!(esc_step(true, true, true), EscStep::Note);
+        assert_eq!(esc_step(false, true, true), EscStep::Menus);
+        assert_eq!(esc_step(false, false, true), EscStep::Close);
+        // Not from the window or the open popup (e.g. the panel button): nothing.
+        assert_eq!(esc_step(true, true, false), EscStep::Nothing);
+        assert_eq!(esc_step(false, false, false), EscStep::Nothing);
     }
 }

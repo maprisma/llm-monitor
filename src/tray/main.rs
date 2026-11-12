@@ -256,14 +256,31 @@ impl Tray {
     #[zbus(signal)]
     async fn new_tool_tip(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
-async fn window_action(toggle: bool, connection: &Connection) {
-    // The window's own connection (its unique name), so a close never reaches
-    // a window that took the well-known name meanwhile; no service activation.
-    if let Ok(dbus) = zbus::fdo::DBusProxy::new(connection).await {
+/// A window this tray started is still running (it may not have claimed its name yet).
+static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The open window's connection. A window this tray just started gets up to 2 s to claim its
+/// name, so a second click while it is starting closes it instead of being lost.
+async fn window_owner(dbus: &zbus::fdo::DBusProxy<'_>) -> Option<zbus::names::OwnedUniqueName> {
+    for _ in 0..40 {
         if let Ok(owner) = dbus
             .get_name_owner("io.github.ubruckhaus.CosmicMaprismaLlmMonitor.Window".try_into().unwrap())
             .await
         {
+            return Some(owner);
+        }
+        if !STARTED.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    None
+}
+async fn window_action(toggle: bool, connection: &Connection) {
+    // The window's own connection (its unique name), so a close never reaches
+    // a window that took the well-known name meanwhile; no service activation.
+    if let Ok(dbus) = zbus::fdo::DBusProxy::new(connection).await {
+        if let Some(owner) = window_owner(&dbus).await {
             if toggle {
                 if let Ok(p) = zbus::Proxy::new(connection, owner.as_str(), "/Window", "io.github.ubruckhaus.LlmMonitor.Window").await {
                     let _ = p.call::<_, _, ()>("Close", &()).await;
@@ -278,8 +295,10 @@ async fn window_action(toggle: bool, connection: &Connection) {
                 .arg("--window")
                 .spawn()
         {
+            STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
             std::thread::spawn(move || {
                 let _ = child.wait();
+                STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
             });
         }
     }
