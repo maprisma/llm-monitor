@@ -7,6 +7,15 @@ impl Window {
         CLOSE.store(true, Ordering::Relaxed);
     }
 }
+/// Tells the open window to close (a second `--window` start toggles, as the tray does).
+pub async fn close_running() {
+    if let Ok(connection) = zbus::Connection::session().await {
+        let _ = connection
+            .call_method(Some("io.github.ubruckhaus.CosmicMaprismaLlmMonitor.Window"), "/Window", Some("io.github.ubruckhaus.LlmMonitor.Window"), "Close", &())
+            .await;
+    }
+}
+
 pub async fn claim() -> zbus::Result<Option<zbus::Connection>> {
     let connection = zbus::connection::Builder::session()?
         .serve_at("/Window", Window)?

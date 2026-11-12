@@ -59,7 +59,11 @@ fn main() -> cosmic::iced::Result {
     if std::env::args().any(|arg| arg == "--window") {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1).enable_all().build().expect("D-Bus runtime");
-        let Some(_connection) = runtime.block_on(window_mode::claim()).expect("Window D-Bus connection") else { return Ok(()) };
+        let Some(_connection) = runtime.block_on(window_mode::claim()).expect("Window D-Bus connection") else {
+            // A second `--window` start toggles (layout rule 5a): the open window closes.
+            runtime.block_on(window_mode::close_running());
+            return Ok(());
+        };
         cosmic::app::run::<Monitor<true>>(cosmic::app::Settings::default()
             .size({ let (width, height) = window_start_size(); cosmic::iced::Size::new(width, height) })
             .resizable(Some(8.0)).transparent(false).is_daemon(false), ())
