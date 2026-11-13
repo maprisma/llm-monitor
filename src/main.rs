@@ -431,7 +431,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         // The desktop's green while a model is loaded (like Hue's lit bulb), else dimmed.
         let chip = if active {
             chip.class(theme::Svg::custom(|t: &cosmic::Theme| cosmic::iced::widget::svg::Style {
-                color: Some(Color::from(t.cosmic().success_color())),
+                color: Some(Color::from(t.cosmic().accent_color())),
             }))
         } else {
             chip.opacity(0.6)

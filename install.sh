@@ -19,7 +19,7 @@ install -Dm755 scripts/free-gpu.sh "$data/maprisma-llm-monitor/scripts/free-gpu.
 install -Dm644 "data/icons/$id-symbolic.svg" "$data/icons/hicolor/scalable/apps/$id-symbolic.svg"
 # The chip without its core, shown while no model is loaded.
 install -Dm644 "data/icons/$id-off-symbolic.svg" "$data/icons/hicolor/scalable/apps/$id-off-symbolic.svg"
-# The full chip in the desktop green (ColorScheme-PositiveText), shown while a model is loaded.
+# The full chip in the theme accent (ColorScheme-Highlight), shown while a model is loaded.
 install -Dm644 "data/icons/$id-active-symbolic.svg" "$data/icons/hicolor/scalable/apps/$id-active-symbolic.svg"
 # Desktop Exec has two escaping layers: quoted arguments, then string values.
 desktop_arg() {

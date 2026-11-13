@@ -47,7 +47,7 @@ pub fn menu() -> Item {
     root.children.push(languages);
     root
 }
-/// The bar's chip: full and in the desktop green while a model is loaded, else the chip without its core.
+/// The bar's chip: full and in the theme accent while a model is loaded, else the chip without its core.
 pub fn icon_for(stats: &Value) -> &'static str {
     if stats["active"].as_bool() == Some(true) { super::ICON_ACTIVE } else { super::ICON_OFF }
 }
@@ -84,7 +84,7 @@ mod tests {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/data/icons/");
         let install = include_str!("../../install.sh");
         for (name, class) in [
-            (super::super::ICON_ACTIVE, "ColorScheme-PositiveText"),
+            (super::super::ICON_ACTIVE, "ColorScheme-Highlight"),
             (super::super::ICON_OFF, "ColorScheme-Text"),
         ] {
             let svg = std::fs::read_to_string(format!("{dir}{name}.svg")).unwrap();
