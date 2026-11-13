@@ -47,6 +47,10 @@ pub fn menu() -> Item {
     root.children.push(languages);
     root
 }
+/// The bar's chip: full while a model is loaded, else the chip without its core.
+pub fn icon_for(stats: &Value) -> &'static str {
+    if stats["active"].as_bool() == Some(true) { super::ICON } else { super::ICON_OFF }
+}
 pub fn tooltip(stats: &Value) -> String {
     if stats.get("error").is_some() {
         return tr("Waiting for the collector…");
@@ -75,6 +79,13 @@ pub fn tooltip(stats: &Value) -> String {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tray_chip_follows_the_model() {
+        use serde_json::json;
+        assert_eq!(super::icon_for(&json!({"active":true})), super::super::ICON);
+        assert_eq!(super::icon_for(&json!({"active":false})), super::super::ICON_OFF);
+        assert_eq!(super::icon_for(&serde_json::Value::Null), super::super::ICON_OFF);
+    }
     use super::*;
     use serde_json::json;
     #[test]

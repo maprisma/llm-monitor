@@ -34,6 +34,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 const APP_ID: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor";
 const ICON: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-symbolic";
+/// The chip without its core, while no model is loaded.
+const ICON_OFF: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-off-symbolic";
 static AUTOSIZE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("llm-monitor-autosize"));
 static NOTE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("llm-monitor-shot-note"));
 // F12 pictures go to ~/Pictures/<this>/ (the app's name, the same in every language).
@@ -425,7 +427,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         let active = self.active();
         let fraction = context_fraction(&self.stats);
         let icon_size = self.core.applet.suggested_size(true).0;
-        let chip = icon::from_name(ICON).size(icon_size).symbolic(true).icon();
+        let chip = icon::from_name(if active { ICON } else { ICON_OFF }).size(icon_size).symbolic(true).icon();
         let line: Element<Message> = match fraction {
             Some(f) => container(bar(vec![(f.max(0.03), fill(level_color(f), 1.0))], 2.0))
                 .width(Length::Fixed(icon_size as f32))

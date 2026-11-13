@@ -3,7 +3,7 @@
 #   ~/.local/bin/maprisma-llm-monitor                  the applet
 #   ~/.local/share/maprisma-llm-monitor/scripts/       the collector and free-gpu.sh
 #   ~/.local/share/applications/…desktop             makes it an applet for the panel
-#   ~/.local/share/icons/hicolor/scalable/apps/…svg  the chip icon
+#   ~/.local/share/icons/hicolor/scalable/apps/…svg  the chip icons (loaded / -off)
 # Then add it in COSMIC Settings › Desktop › Panel › Applets.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -17,6 +17,8 @@ install -Dm755 target/release/maprisma-llm-monitor-tray "$bin/maprisma-llm-monit
 install -Dm644 scripts/llm-monitor.py "$data/maprisma-llm-monitor/scripts/llm-monitor.py"
 install -Dm755 scripts/free-gpu.sh "$data/maprisma-llm-monitor/scripts/free-gpu.sh"
 install -Dm644 "data/icons/$id-symbolic.svg" "$data/icons/hicolor/scalable/apps/$id-symbolic.svg"
+# The chip without its core, shown while no model is loaded.
+install -Dm644 "data/icons/$id-off-symbolic.svg" "$data/icons/hicolor/scalable/apps/$id-off-symbolic.svg"
 # Desktop Exec has two escaping layers: quoted arguments, then string values.
 desktop_arg() {
     local v=$1

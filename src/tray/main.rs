@@ -15,10 +15,13 @@ type Props = HashMap<String, OwnedValue>;
 type Layout = (i32, Props, Vec<OwnedValue>);
 type Pixmaps = Vec<(i32, i32, Vec<u8>)>;
 const ICON: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-symbolic";
+/// No model loaded (data/icons/…-off-symbolic.svg).
+const ICON_OFF: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-off-symbolic";
 struct State {
     menu: model::Item,
     revision: u32,
     tooltip: String,
+    icon: &'static str,
 }
 impl State {
     fn status(&self) -> &'static str {
@@ -200,8 +203,8 @@ impl Tray {
         0
     }
     #[zbus(property)]
-    fn icon_name(&self) -> &str {
-        ICON
+    async fn icon_name(&self) -> &str {
+        self.state.lock().await.icon
     }
     #[zbus(property)]
     fn icon_pixmap(&self) -> Pixmaps {
@@ -256,6 +259,8 @@ impl Tray {
     async fn new_status(emitter: &SignalEmitter<'_>, status: &str) -> zbus::Result<()>;
     #[zbus(signal)]
     async fn new_tool_tip(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+    #[zbus(signal)]
+    async fn new_icon(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 /// A window this tray started is still running (it may not have claimed its name yet).
 static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -307,7 +312,7 @@ async fn window_action(toggle: bool, connection: &Connection) {
         }
     }
 }
-async fn collect(tx: mpsc::Sender<String>) {
+async fn collect(tx: mpsc::Sender<(String, &'static str)>) {
     loop {
         if let Some(script) = script_path("llm-monitor.py") {
             if let Ok(mut child) = tokio::process::Command::new("python3")
@@ -322,7 +327,7 @@ async fn collect(tx: mpsc::Sender<String>) {
                 let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     if let Ok(stats) = serde_json::from_str::<serde_json::Value>(&line) {
-                        if tx.send(model::tooltip(&stats)).await.is_err() {
+                        if tx.send((model::tooltip(&stats), model::icon_for(&stats))).await.is_err() {
                             return;
                         }
                     }
@@ -330,7 +335,7 @@ async fn collect(tx: mpsc::Sender<String>) {
                 let _ = child.kill().await;
             }
         }
-        if tx.send(tr("Waiting for the collector…")).await.is_err() {
+        if tx.send((tr("Waiting for the collector…"), ICON_OFF)).await.is_err() {
             return;
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -342,6 +347,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         menu: model::menu(),
         revision: 1,
         tooltip: tr("Waiting for the collector…"),
+        icon: ICON_OFF,
     };
     let state = Arc::new(Mutex::new(initial));
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -420,8 +426,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let collector = tokio::spawn(collect(stats_tx));
     loop {
         tokio::select! {
-            Some(tooltip) = stats_rx.recv() => {
+            Some((tooltip, icon)) = stats_rx.recv() => {
                 let mut s = state.lock().await;
+                if s.icon != icon {
+                    s.icon = icon;
+                    Tray::new_icon(&SignalEmitter::new(&connection, "/StatusNotifierItem")?).await?;
+                }
                 let menu = model::menu();
                 if s.menu != menu {
                     s.menu = menu; s.revision += 1;
@@ -479,6 +489,7 @@ mod tests {
             menu: model::menu(),
             revision: 1,
             tooltip: String::new(),
+            icon: ICON_OFF,
         }));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let menu = Menu { state, tx };
