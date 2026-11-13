@@ -15,6 +15,8 @@ type Props = HashMap<String, OwnedValue>;
 type Layout = (i32, Props, Vec<OwnedValue>);
 type Pixmaps = Vec<(i32, i32, Vec<u8>)>;
 const ICON: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-symbolic";
+/// A model is loaded: the chip in the desktop green (ColorScheme-PositiveText).
+const ICON_ACTIVE: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-active-symbolic";
 /// No model loaded (data/icons/…-off-symbolic.svg).
 const ICON_OFF: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-off-symbolic";
 struct State {

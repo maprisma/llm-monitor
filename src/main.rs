@@ -428,6 +428,14 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         let fraction = context_fraction(&self.stats);
         let icon_size = self.core.applet.suggested_size(true).0;
         let chip = icon::from_name(if active { ICON } else { ICON_OFF }).size(icon_size).symbolic(true).icon();
+        // The desktop's green while a model is loaded (like Hue's lit bulb), else dimmed.
+        let chip = if active {
+            chip.class(theme::Svg::custom(|t: &cosmic::Theme| cosmic::iced::widget::svg::Style {
+                color: Some(Color::from(t.cosmic().success_color())),
+            }))
+        } else {
+            chip.opacity(0.6)
+        };
         let line: Element<Message> = match fraction {
             Some(f) => container(bar(vec![(f.max(0.03), fill(level_color(f), 1.0))], 2.0))
                 .width(Length::Fixed(icon_size as f32))

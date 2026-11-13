@@ -47,9 +47,9 @@ pub fn menu() -> Item {
     root.children.push(languages);
     root
 }
-/// The bar's chip: full while a model is loaded, else the chip without its core.
+/// The bar's chip: full and in the desktop green while a model is loaded, else the chip without its core.
 pub fn icon_for(stats: &Value) -> &'static str {
-    if stats["active"].as_bool() == Some(true) { super::ICON } else { super::ICON_OFF }
+    if stats["active"].as_bool() == Some(true) { super::ICON_ACTIVE } else { super::ICON_OFF }
 }
 pub fn tooltip(stats: &Value) -> String {
     if stats.get("error").is_some() {
@@ -80,9 +80,23 @@ pub fn tooltip(stats: &Value) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn chip_icons_are_installed_and_styled() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/data/icons/");
+        let install = include_str!("../../install.sh");
+        for (name, class) in [
+            (super::super::ICON_ACTIVE, "ColorScheme-PositiveText"),
+            (super::super::ICON_OFF, "ColorScheme-Text"),
+        ] {
+            let svg = std::fs::read_to_string(format!("{dir}{name}.svg")).unwrap();
+            assert!(svg.contains(&format!(".{class} {{")) && svg.contains(&format!("class=\"{class}\"")), "{name}");
+            let suffix = name.trim_start_matches("io.github.ubruckhaus.CosmicMaprismaLlmMonitor");
+            assert!(install.contains(&format!("data/icons/$id{suffix}.svg")), "{name} not installed");
+        }
+    }
+    #[test]
     fn tray_chip_follows_the_model() {
         use serde_json::json;
-        assert_eq!(super::icon_for(&json!({"active":true})), super::super::ICON);
+        assert_eq!(super::icon_for(&json!({"active":true})), super::super::ICON_ACTIVE);
         assert_eq!(super::icon_for(&json!({"active":false})), super::super::ICON_OFF);
         assert_eq!(super::icon_for(&serde_json::Value::Null), super::super::ICON_OFF);
     }
