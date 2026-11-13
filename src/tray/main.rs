@@ -1,4 +1,5 @@
 mod model;
+mod present;
 use maprisma_llm_monitor::{script_path, i18n::{tr, set_language, language_options}};
 use model::Action;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -285,6 +286,9 @@ async fn window_action(toggle: bool, connection: &Connection) {
                 if let Ok(p) = zbus::Proxy::new(connection, owner.as_str(), "/Window", "io.github.ubruckhaus.LlmMonitor.Window").await {
                     let _ = p.call::<_, _, ()>("Close", &()).await;
                 }
+            } else {
+                // "Open": a minimized or hidden window comes to the front.
+                present::present(connection, owner.as_str()).await;
             }
             return;
         }
