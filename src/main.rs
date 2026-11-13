@@ -750,6 +750,12 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
         (app, task)
     }
 
+    /// COSMIC's colours or light/dark mode changed: a window with its own corners (a custom
+    /// theme, which libcosmic leaves alone) takes the new colours too.
+    fn system_theme_update(&mut self, _keys: &[&'static str], new_theme: &cosmic::cosmic_theme::Theme) -> Task<Message> {
+        corners::system_theme_update(&self.corners, new_theme, self.window_mode)
+    }
+
     fn on_close_requested(&self, id: window::Id) -> Option<Message> {
         Some(Message::CloseRequested(id))
     }
