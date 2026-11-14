@@ -66,10 +66,11 @@ fn main() -> cosmic::iced::Result {
             runtime.block_on(window_mode::close_running());
             return Ok(());
         };
-        cosmic::app::run::<Monitor<true>>(cosmic::app::Settings::default()
+        cosmic::app::run::<Monitor<true>>(cosmic::app::Settings::default().default_font(maprisma_llm_monitor::look::default_font())
             .size({ let (width, height) = window_start_size(); cosmic::iced::Size::new(width, height) })
             .resizable(Some(8.0)).transparent(false).is_daemon(false), ())
     } else {
+        maprisma_llm_monitor::look::keep_fonts();
         cosmic::applet::run::<Monitor<false>>(())
     }
 }
@@ -966,6 +967,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        maprisma_llm_monitor::look::keep_fonts();
         if self.window_mode { return corners::apply_window(&self.corners, self.popup_content()); }
         let horizontal = matches!(self.core.applet.anchor, PanelAnchor::Top | PanelAnchor::Bottom);
         let padding = self.core.applet.suggested_padding(true).0;
@@ -983,6 +985,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     }
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
+        maprisma_llm_monitor::look::keep_fonts();
         if self.window_mode { return corners::apply_window(&self.corners, self.popup_content()); }
         corners::apply(&self.corners, self.core.applet.popup_container(self.popup_content()))
     }
