@@ -631,6 +631,12 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         if !pill.is_empty() {
             header = header.push(container(text::caption(pill)).padding([2, 10]).class(track(pill_radius())));
         }
+        // Settings at the header's right end, as in Maprisma Launcher.
+        header = header.push(cosmic::widget::tooltip(
+            button::icon(icon::from_name("emblem-system-symbolic").symbolic(true)).on_press(Message::ToggleSettings),
+            text::body(tr("Settings")),
+            cosmic::widget::tooltip::Position::Bottom,
+        ));
 
         let mut content = column![header, divider::horizontal::default()].spacing(8);
 
@@ -1202,11 +1208,6 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
                 tr("Open TaskManager"),
             ));
         }
-        tools = tools.push(space::horizontal().width(Length::Fill));
-        tools = tools.push(tip(
-            button::icon(icon::from_name("emblem-system-symbolic").symbolic(true)).on_press(Message::ToggleSettings),
-            tr("Settings"),
-        ));
         let mut actions = column![
             divider::horizontal::default(),
             menu_button(text::body(tr("Free GPU memory"))).on_press_maybe(self.active().then_some(Message::FreeGpu)),
