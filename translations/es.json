@@ -72,5 +72,6 @@
   "Stop llama-server, Ollama and vLLM services, unload LM Studio models": "Detener los servicios llama-server, Ollama y vLLM, descargar los modelos de LM Studio",
   "sleeping": "en reposo",
   "loading": "cargando",
-  "unloaded": "descargado"
+  "unloaded": "descargado",
+  "Open TaskManager": "Abrir TaskManager"
 }

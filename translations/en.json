@@ -72,5 +72,6 @@
   "Stop llama-server, Ollama and vLLM services, unload LM Studio models": "Stop llama-server, Ollama and vLLM services, unload LM Studio models",
   "sleeping": "sleeping",
   "loading": "loading",
-  "unloaded": "unloaded"
+  "unloaded": "unloaded",
+  "Open TaskManager": "Open TaskManager"
 }

@@ -338,6 +338,10 @@ struct Monitor<const WINDOW_MODE: bool> {
     corners_open: bool,
     setting_error: bool,
     resize: window_size::Debounce,
+    /// The settings page (Language, F12, Corners) is shown instead of the details.
+    settings_open: bool,
+    /// TaskManager OG when it is installed (its AppImage in ~/Applications or `tmog`).
+    task_manager: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +353,8 @@ enum Message {
     Rectangle(RectangleUpdate<u32>),
     FreeGpu,
     OpenBtop,
+    OpenTaskManager,
+    ToggleSettings,
     Pulse,
     CheckClose,
     Language(String),
@@ -372,23 +378,59 @@ enum EscStep {
     Note,
     /// Close the open Language / Corners list.
     Menus,
+    /// Leave the settings page.
+    Back,
     /// Close the window (`--window`) or the popup.
     Close,
     Nothing,
 }
 
-/// `note`: the screenshot card shows; `menus`: a list is open; `shown`: Esc came from the
-/// window or the open popup (not the panel button).
-fn esc_step(note: bool, menus: bool, shown: bool) -> EscStep {
+/// `note`: the screenshot card shows; `menus`: a list is open; `settings`: the settings page
+/// shows; `shown`: Esc came from the window or the open popup (not the panel button).
+fn esc_step(note: bool, menus: bool, settings: bool, shown: bool) -> EscStep {
     if !shown {
         EscStep::Nothing
     } else if note {
         EscStep::Note
     } else if menus {
         EscStep::Menus
+    } else if settings {
+        EscStep::Back
     } else {
         EscStep::Close
     }
+}
+
+/// TaskManager OG, when installed: `tmog` on PATH, else its AppImage in ~/Applications (as
+/// Maprisma Launcher installs AppImages; the newest name when there are several).
+fn find_task_manager() -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |p: &std::path::Path| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("tmog");
+            if executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    let home = std::env::var_os("HOME")?;
+    let mut found: Vec<_> = std::fs::read_dir(std::path::Path::new(&home).join("Applications"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_ascii_lowercase();
+            task_manager_name(&name) && executable(p)
+        })
+        .collect();
+    found.sort();
+    found.pop()
+}
+
+/// An AppImage file name (lower case) that is TaskManager OG's.
+fn task_manager_name(name: &str) -> bool {
+    name.ends_with(".appimage") && (name.starts_with("taskmanager") || name.starts_with("tmog"))
 }
 
 // Runs `work` on its own thread (saving must not hold up the popup) and answers with `done`.
@@ -752,7 +794,14 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
         maprisma_llm_monitor::look::solid(&mut core);
         let window_mode = WINDOW_MODE;
         let mut app = Self { core, window_mode, shot_key: shot_key_setting(), corners: corners_setting(), ..Default::default() };
-        if window_mode { app.resize = window_size::Debounce::new(window_start_size()); }
+        app.task_manager = find_task_manager();
+        // Debug builds only: start on the settings page (for off-screen screenshots).
+        app.settings_open = cfg!(debug_assertions) && std::env::var("MAPRISMA_SHOT_PAGE").as_deref() == Ok("settings");
+        if window_mode {
+            app.resize = window_size::Debounce::new(window_start_size());
+            // Hyprland: back where the user left it (the tray rule first puts it under the bar).
+            window_size::restore_position(window_size::parse_position(read_pref(window_size::POSITION_KEY).as_ref()), window_start_size());
+        }
         corners::set_current(&app.corners);
         let task = if window_mode {
             app.set_header_title(tr("Maprisma LLM Monitor"));
@@ -852,9 +901,10 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
             Message::NoteDone => return self.finish_note(true),
             Message::Escape(id) => {
                 let shown = if self.window_mode { self.core.main_window_id() == Some(id) } else { self.popup == Some(id) };
-                match esc_step(self.shot.open(), self.language_open || self.corners_open, shown) {
+                match esc_step(self.shot.open(), self.language_open || self.corners_open, self.settings_open, shown) {
                     EscStep::Note => return self.finish_note(false),
                     EscStep::Menus => { self.language_open = false; self.corners_open = false; }
+                    EscStep::Back => self.settings_open = false,
                     // Like the window's own close (the tray keeps running); the popup like a click on the icon.
                     EscStep::Close if self.window_mode => { self.save_size(true); return cosmic::iced::exit(); }
                     EscStep::Close => {
@@ -962,6 +1012,19 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                     return Task::batch([self.popup_closed(), destroy_popup(popup)]);
                 }
             }
+            Message::OpenTaskManager => {
+                if let Some(path) = self.task_manager.clone().filter(|p| p.exists()).or_else(find_task_manager) {
+                    spawn_detached(vec![path.to_string_lossy().into_owned()], false);
+                }
+                if let Some(popup) = self.popup.take() {
+                    return Task::batch([self.popup_closed(), destroy_popup(popup)]);
+                }
+            }
+            Message::ToggleSettings => {
+                self.settings_open = !self.settings_open;
+                self.language_open = false;
+                self.corners_open = false;
+            }
         }
         Task::none()
     }
@@ -1025,6 +1088,10 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         if let Some(size) = size {
             self.setting_error = write_pref(window_size::KEY, Some(window_size::to_value(size))).is_err();
         }
+        // Hyprland: where the user left it, for the next open (a move sends no event, so on close).
+        if closing && let Some(position) = window_size::current_position() {
+            self.setting_error |= write_pref(window_size::POSITION_KEY, Some(window_size::position_value(position))).is_err();
+        }
     }
 
     fn popup_closed(&mut self) -> Task<Message> {
@@ -1061,44 +1128,90 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         Some(card.into())
     }
 
+    /// Settings (as Maprisma Launcher's page): ← Back and the title, then one row per setting,
+    /// words at the left and the control at the right; a list opens under its row.
+    fn settings_page(&self) -> Element<'_, Message> {
+        let header = row![
+            button::text(tr("Back")).leading_icon(icon::from_name("go-previous-symbolic").size(16)).on_press(Message::ToggleSettings),
+            space::horizontal().width(Length::Fill),
+            dim(tr("Settings").to_uppercase()),
+        ]
+        .align_y(Alignment::Center);
+        let choice = |label: String, open: bool, message: Message| -> Element<'_, Message> {
+            button::text(label)
+                .trailing_icon(icon::from_name(if open { "pan-up-symbolic" } else { "pan-down-symbolic" }).size(16))
+                .on_press(message)
+                .into()
+        };
+        let setting = |label: String, control: Element<'static, Message>| {
+            padded_control(row![text::body(label), space::horizontal().width(Length::Fill), control].spacing(12).align_y(Alignment::Center))
+        };
+        let options = language_options();
+        let current = options.iter().find_map(|(_, l)| l.strip_prefix("✓ ").map(str::to_owned)).unwrap_or_default();
+        let mut page = column![padded_control(header), divider::horizontal::default()];
+        page = page.push(setting(tr("Language"), choice(current, self.language_open, Message::ToggleLanguage)));
+        if self.language_error { page = page.push(padded_control(text::body(tr("Could not save the language setting.")))); }
+        if self.language_open {
+            for (code, label) in options {
+                page = page.push(menu_button(text::body(label)).on_press(Message::Language(code)));
+            }
+        }
+        page = page.push(setting(
+            tr("F12 saves a screenshot"),
+            cosmic::widget::toggler(self.shot_key).on_toggle(Message::SetShotKey).into(),
+        ));
+        let desktop = corners::desktop_radius().round().to_string();
+        let corner_choices = [
+            ("desktop", trf("Like the desktop ({0} px)", &[desktop])),
+            ("slight", trf("Slightly rounded ({0} px)", &["6".into()])),
+            ("rounded", trf("Rounded ({0} px)", &["12".into()])),
+            ("square", tr("Square")),
+        ];
+        let current = corner_choices.iter().find(|(c, _)| *c == self.corners).map(|(_, l)| l.clone()).unwrap_or_default();
+        page = page.push(setting(tr("Corners"), choice(current, self.corners_open, Message::ToggleCorners)));
+        if self.corners_open {
+            for (choice, label) in corner_choices {
+                let label = if self.corners == choice { format!("✓ {label}") } else { label };
+                page = page.push(menu_button(text::body(label)).on_press(Message::Corners(choice.into())));
+            }
+        }
+        if self.setting_error { page = page.push(padded_control(text::body(tr("Could not save the setting.")))); }
+        let page = page.width(if self.window_mode { Length::Fill } else { Length::Fixed(POPUP_WIDTH) }).padding([0, 0, 8, 0]);
+        scrollable(page).height(if self.window_mode { Length::Fill } else { Length::Shrink }).into()
+    }
+
     fn popup_content(&self) -> Element<'_, Message> {
         if let Some(overlay) = self.shot_overlay() {
             return overlay;
         }
+        if self.settings_open {
+            return self.settings_page();
+        }
+        let tip = |button: cosmic::widget::button::IconButton<'static, Message>, label: String| -> Element<'static, Message> {
+            cosmic::widget::tooltip(button, text::body(label), cosmic::widget::tooltip::Position::Top).into()
+        };
+        let mut tools = row![tip(
+            button::icon(icon::from_name("utilities-terminal-symbolic").symbolic(true)).on_press(Message::OpenBtop),
+            tr("Open btop"),
+        )]
+        .spacing(4)
+        .align_y(Alignment::Center);
+        if self.task_manager.is_some() {
+            tools = tools.push(tip(
+                button::icon(icon::from_name("utilities-system-monitor-symbolic").symbolic(true)).on_press(Message::OpenTaskManager),
+                tr("Open TaskManager"),
+            ));
+        }
+        tools = tools.push(space::horizontal().width(Length::Fill));
+        tools = tools.push(tip(
+            button::icon(icon::from_name("emblem-system-symbolic").symbolic(true)).on_press(Message::ToggleSettings),
+            tr("Settings"),
+        ));
         let mut actions = column![
             divider::horizontal::default(),
             menu_button(text::body(tr("Free GPU memory"))).on_press_maybe(self.active().then_some(Message::FreeGpu)),
-            menu_button(text::body(tr("Open btop"))).on_press(Message::OpenBtop),
+            container(tools).padding([4, 12]),
         ];
-        actions = actions.push(menu_button(text::body(tr("Language"))).on_press(Message::ToggleLanguage));
-        if self.language_error { actions = actions.push(text::body(tr("Could not save the language setting."))); }
-        if self.language_open {
-            for (code, label) in language_options() {
-                actions = actions.push(menu_button(text::body(label)).on_press(Message::Language(code)));
-            }
-            return scrollable(container(actions).padding(8)).height(Length::Fixed(460.0)).into();
-        }
-        actions = actions.push(padded_control(
-            row![
-                text::body(tr("F12 saves a screenshot")),
-                space::horizontal().width(Length::Fill),
-                cosmic::widget::toggler(self.shot_key).on_toggle(Message::SetShotKey),
-            ]
-            .align_y(Alignment::Center),
-        ));
-        actions = actions.push(menu_button(text::body(tr("Corners"))).on_press(Message::ToggleCorners));
-        if self.corners_open {
-            let desktop = corners::desktop_radius().round().to_string();
-            for (choice, label) in [
-                ("desktop", trf("Like the desktop ({0} px)", &[desktop])),
-                ("slight", trf("Slightly rounded ({0} px)", &["6".into()])),
-                ("rounded", trf("Rounded ({0} px)", &["12".into()])),
-                ("square", tr("Square")),
-            ] {
-                let label = if self.corners == choice { format!("✓ {label}") } else { label };
-                actions = actions.push(menu_button(text::body(label)).on_press(Message::Corners(choice.into())));
-            }
-        }
         if self.setting_error { actions = actions.push(text::body(tr("Could not save the setting."))); }
         let detail_content = if self.window_mode { container(self.details()).padding([12, 16]).width(Length::Fill) } else { padded_control(self.details()).padding([12, 16]) };
         let details = scrollable(detail_content).height(if self.window_mode { Length::Fill } else { Length::Shrink });
@@ -1179,11 +1292,20 @@ mod tests {
 
     #[test]
     fn esc_closes_the_innermost_thing_first() {
-        assert_eq!(esc_step(true, true, true), EscStep::Note);
-        assert_eq!(esc_step(false, true, true), EscStep::Menus);
-        assert_eq!(esc_step(false, false, true), EscStep::Close);
+        assert_eq!(esc_step(true, true, true, true), EscStep::Note);
+        assert_eq!(esc_step(false, true, true, true), EscStep::Menus);
+        assert_eq!(esc_step(false, false, false, true), EscStep::Close);
+        assert_eq!(esc_step(false, false, true, true), EscStep::Back);
         // Not from the window or the open popup (e.g. the panel button): nothing.
-        assert_eq!(esc_step(true, true, false), EscStep::Nothing);
-        assert_eq!(esc_step(false, false, false), EscStep::Nothing);
+        assert_eq!(esc_step(true, true, true, false), EscStep::Nothing);
+        assert_eq!(esc_step(false, false, false, false), EscStep::Nothing);
+    }
+
+    #[test]
+    fn task_manager_appimages_by_name() {
+        assert!(task_manager_name("taskmanagerog-1.1.1-x86_64.appimage"));
+        assert!(task_manager_name("tmog-2.0.appimage"));
+        assert!(!task_manager_name("taskmanagerog-1.1.1-x86_64.appimage.part"));
+        assert!(!task_manager_name("btop.appimage"));
     }
 }
