@@ -747,6 +747,8 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     }
 
     fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
+        let mut core = core;
+        maprisma_llm_monitor::look::solid(&mut core);
         let window_mode = WINDOW_MODE;
         let mut app = Self { core, window_mode, shot_key: shot_key_setting(), corners: corners_setting(), ..Default::default() };
         if window_mode { app.resize = window_size::Debounce::new(window_start_size()); }
