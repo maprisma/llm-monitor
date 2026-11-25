@@ -24,3 +24,4 @@ pub mod i18n;
 pub mod shot;
 pub mod corners;
 pub mod look;
+pub mod skin;

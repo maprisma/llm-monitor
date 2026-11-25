@@ -9,7 +9,7 @@
 // seconds. It only reads /proc, sysfs and the runtimes' local APIs; it never
 // starts or stops a runtime.
 
-use maprisma_llm_monitor::{corners, script_path, shot, i18n::{tr, trf, language_options, set_language, read_pref, write_pref}};
+use maprisma_llm_monitor::{corners, script_path, shot, skin::{self, SKIN_KEY, SKINS, skin_label, skin_style}, i18n::{tr, trf, language_options, set_language, read_pref, write_pref}};
 use cosmic::app::ApplicationExt;
 mod window_mode;
 mod window_size;
@@ -201,6 +201,46 @@ fn pill_radius() -> f32 {
     corners::now().pill
 }
 
+fn with_alpha(mut color: Color, alpha: f32) -> Color {
+    color.a = alpha;
+    color
+}
+
+fn card_style(skin: &str) -> theme::Container<'static> {
+    let style = skin_style(skin);
+    theme::Container::custom(move |theme: &cosmic::Theme| {
+        let base = Color::from(theme.cosmic().on_bg_color());
+        let (background, border, width) = match style {
+            Some(st) => (with_alpha(st.bg_tint, 0.28), with_alpha(st.border_tint, 0.48), st.border_width),
+            None => (with_alpha(base, 0.05), with_alpha(base, 0.1), 1.0),
+        };
+        iced_container::Style { background: Some(Background::Color(background)), border: Border { radius: corners::now().radius.into(), width, color: border }, ..Default::default() }
+    })
+}
+
+fn sub_card_style(skin: &str) -> theme::Container<'static> {
+    let style = skin_style(skin);
+    theme::Container::custom(move |theme: &cosmic::Theme| {
+        let base = Color::from(theme.cosmic().on_bg_color());
+        let (background, border) = match style {
+            Some(st) => (with_alpha(st.bg_tint, 0.22), with_alpha(st.border_tint, 0.40)),
+            None => (with_alpha(base, 0.04), with_alpha(base, 0.12)),
+        };
+        iced_container::Style { background: Some(Background::Color(background)), border: Border { radius: corners::now().small.into(), width: 1.0, color: border }, ..Default::default() }
+    })
+}
+
+fn pill_style(skin: &str) -> theme::Container<'static> {
+    let style = skin_style(skin);
+    theme::Container::custom(move |theme: &cosmic::Theme| {
+        let (background, border) = match style {
+            Some(st) => (with_alpha(st.accent, 0.24), with_alpha(st.border_tint, 0.48)),
+            None => (with_alpha(Color::from(theme.cosmic().on_bg_color()), 0.12), Color::TRANSPARENT),
+        };
+        iced_container::Style { background: Some(Background::Color(background)), border: Border { radius: corners::now().pill.into(), width: 1.0, color: border }, ..Default::default() }
+    })
+}
+
 fn fill(color: Color, radius: f32) -> theme::Container<'static> {
     theme::Container::custom(move |_| iced_container::Style {
         background: Some(Background::Color(color)),
@@ -209,12 +249,13 @@ fn fill(color: Color, radius: f32) -> theme::Container<'static> {
     })
 }
 
-fn track(radius: f32) -> theme::Container<'static> {
+fn track(radius: f32, skin: &str) -> theme::Container<'static> {
+    let style = skin_style(skin);
     theme::Container::custom(move |theme: &cosmic::Theme| {
         let mut color = Color::from(theme.cosmic().on_bg_color());
         color.a = 0.12;
         iced_container::Style {
-            background: Some(Background::Color(color)),
+            background: Some(Background::Color(style.map_or(color, |st| with_alpha(st.bg_tint, 0.35)))),
             border: Border { radius: radius.into(), ..Default::default() },
             ..Default::default()
         }
@@ -242,7 +283,7 @@ fn neutral_fill(radius: f32) -> theme::Container<'static> {
 }
 
 // A rounded track with fills side by side, each (fraction, its style).
-fn bar<'a>(segments: Vec<(f64, theme::Container<'static>)>, height: f32) -> Element<'a, Message> {
+fn bar<'a>(segments: Vec<(f64, theme::Container<'static>)>, height: f32, skin: &str) -> Element<'a, Message> {
     let mut line = Row::new().width(Length::Fill).height(Length::Fixed(height));
     let mut used: u16 = 0;
     for (fraction, class) in segments {
@@ -262,18 +303,18 @@ fn bar<'a>(segments: Vec<(f64, theme::Container<'static>)>, height: f32) -> Elem
     if used < 1000 {
         line = line.push(space::horizontal().width(Length::FillPortion(1000 - used)));
     }
-    container(line).width(Length::Fill).class(track((height / 2.0).min(small()))).into()
+    container(line).width(Length::Fill).class(track((height / 2.0).min(small()), skin)).into()
 }
 
-fn level_bar<'a>(fraction: f64) -> Element<'a, Message> {
-    bar(vec![(fraction, fill(level_color(fraction), small()))], 4.0)
+fn level_bar<'a>(fraction: f64, skin: &str) -> Element<'a, Message> {
+    bar(vec![(fraction, fill(level_color(fraction), small()))], 4.0, skin)
 }
 
 // Label left, value right, a bar underneath.
-fn meter<'a>(name: String, value: String, fraction: f64) -> Element<'a, Message> {
+fn meter<'a>(name: String, value: String, fraction: f64, skin: &str) -> Element<'a, Message> {
     column![
         row![dim(name), space::horizontal().width(Length::Fill), text::caption(value)].align_y(Alignment::Center),
-        bar(vec![(fraction, neutral_fill(small()))], 6.0),
+        bar(vec![(fraction, neutral_fill(small()))], 6.0, skin),
     ]
     .spacing(4)
     .into()
@@ -290,6 +331,7 @@ fn legend<'a>(
     amount: String,
     note: String,
     fraction: Option<f64>,
+    skin: &str,
 ) -> Element<'a, Message> {
     let mut block = column![
         row![
@@ -306,7 +348,7 @@ fn legend<'a>(
         block = block.push(container(dim(note)).padding([0, 0, 0, 18]));
     }
     if let Some(fraction) = fraction {
-        block = block.push(container(level_bar(fraction)).padding([0, 0, 0, 18]));
+        block = block.push(container(level_bar(fraction, skin)).padding([0, 0, 0, 18]));
     }
     block.into()
 }
@@ -336,6 +378,9 @@ struct Monitor<const WINDOW_MODE: bool> {
     shot_key: bool,
     corners: String,
     corners_open: bool,
+    skin: String,
+    skin_open: bool,
+    cached_theme: Option<cosmic::Theme>,
     setting_error: bool,
     resize: window_size::Debounce,
     /// The settings page (Language, F12, Corners) is shown instead of the details.
@@ -369,6 +414,8 @@ enum Message {
     SetShotKey(bool),
     ToggleCorners,
     Corners(String),
+    ToggleSkin,
+    SetSkin(String),
 }
 
 /// What Esc does (layout rule 5a): the innermost open thing first, then the window or popup.
@@ -456,7 +503,33 @@ fn corners_setting() -> String {
     corners::normalize(read_pref("corners").as_ref().and_then(Value::as_str).unwrap_or("")).to_string()
 }
 
+fn skin_setting() -> String {
+    skin::normalize_skin(read_pref(SKIN_KEY).as_ref().and_then(Value::as_str).unwrap_or("")).to_string()
+}
+
 impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
+    fn rebuild_cached_theme(&mut self) {
+        self.cached_theme = skin::active_theme(&self.skin, &self.corners);
+    }
+
+    fn apply_window_theme(&self) -> Task<Message> {
+        if !self.window_mode { return Task::none(); }
+        Task::batch([
+            cosmic::command::set_theme(self.cached_theme.clone().unwrap_or_else(cosmic::theme::system_preference)),
+            cosmic::command::set_scaling_factor(maprisma_llm_monitor::look::text_scale()),
+        ])
+    }
+
+    fn themed_window_content(&self) -> Element<'_, Message> {
+        match self.cached_theme.clone() {
+            Some(theme) => cosmic::iced::widget::themer(Some(theme), self.popup_content())
+                .background(maprisma_llm_monitor::look::window_background)
+                .text_color(|t: &cosmic::Theme| t.cosmic().on_bg_color().into())
+                .into(),
+            None => self.popup_content(),
+        }
+    }
+
     fn active(&self) -> bool {
         self.stats.get("active").and_then(Value::as_bool) == Some(true)
     }
@@ -480,7 +553,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             chip.opacity(0.6)
         };
         let line: Element<Message> = match fraction {
-            Some(f) => container(bar(vec![(f.max(0.03), fill(level_color(f), 1.0))], 2.0))
+            Some(f) => container(bar(vec![(f.max(0.03), fill(level_color(f), 1.0))], 2.0, "native"))
                 .width(Length::Fixed(icon_size as f32))
                 .into(),
             None => space::vertical().height(Length::Fixed(2.0)).into(),
@@ -523,7 +596,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         } else if running {
             neutral_fill(pill_radius())
         } else {
-            track(pill_radius())
+            track(pill_radius(), &self.skin)
         };
         let state = runtime_state(runtime);
         let state: Element<Message> = if loaded {
@@ -574,7 +647,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
                 container(row![dim(caption), space::horizontal().width(Length::Fill), value].align_y(Alignment::Center))
                     .padding([0, 0, 0, 16]),
             );
-            block = block.push(container(level_bar(fraction)).padding([0, 0, 0, 16]));
+            block = block.push(container(level_bar(fraction, &self.skin)).padding([0, 0, 0, 16]));
         }
 
         if running {
@@ -598,7 +671,9 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             }
             block = block.push(container(dim(details.join("  ·  "))).padding([0, 0, 0, 16]));
         }
-        block.into()
+        if skin_style(&self.skin).is_some() {
+            container(block).padding(10).class(sub_card_style(&self.skin)).into()
+        } else { block.into() }
     }
 
     fn details(&self) -> Element<'_, Message> {
@@ -629,7 +704,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         .spacing(12)
         .align_y(Alignment::Center);
         if !pill.is_empty() {
-            header = header.push(container(text::caption(pill)).padding([2, 10]).class(track(pill_radius())));
+            header = header.push(container(text::caption(pill)).padding([2, 10]).class(pill_style(&self.skin)));
         }
         // Settings at the header's right end, as in Maprisma Launcher.
         header = header.push(cosmic::widget::tooltip(
@@ -656,6 +731,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
                 (n(stats, "other_vram") / all, neutral_fill(0.0)),
             ],
             10.0,
+            &self.skin,
         ));
         content = content.push(legend(
             accent_fill(small()),
@@ -663,6 +739,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             format!("{} GiB", gib(n(stats, "llm_vram"))),
             tr("↑ this number is shown in the bar"),
             None,
+            &self.skin,
         ));
 
         // The two buffers that fill while you work: the context (whole
@@ -681,6 +758,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
                 },
                 trf("{0} / {1} tokens ({2}%)", &[tokens(used), tokens(context), (filled * 100.0).round().to_string()]),
                 Some(filled),
+                &self.skin,
             ));
         }
         let limit = n(p, "output_limit");
@@ -699,6 +777,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
                 },
                 if generating { trf("generating {0} / {1} tokens ({2}%)", &[tokens(used), tokens(limit), (filled * 100.0).round().to_string()]) } else { trf("last reply {0} / {1} tokens ({2}%)", &[tokens(used), tokens(limit), (filled * 100.0).round().to_string()]) },
                 Some(filled),
+                &self.skin,
             ));
         }
         let apps: Vec<String> = stats
@@ -712,8 +791,9 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             format!("{} GiB", gib(n(stats, "other_vram"))),
             apps.join(" · "),
             None,
+            &self.skin,
         ));
-        content = content.push(legend(track(small()), tr("Free"), format!("{} GiB", gib(free)), String::new(), None));
+        content = content.push(legend(track(small(), &self.skin), tr("Free"), format!("{} GiB", gib(free)), String::new(), None, &self.skin));
         let spilled = n(stats, "llm_spilled");
         if spilled > SPILL_SHOWN {
             content = content.push(
@@ -731,7 +811,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         if let Some(power) = num(gpu, "power").filter(|w| *w > 0.0) {
             load += &format!("  ·  {} W", power.round());
         }
-        content = content.push(meter(tr("Load"), load, n(gpu, "busy") / 100.0));
+        content = content.push(meter(tr("Load"), load, n(gpu, "busy") / 100.0, &self.skin));
         if let Some(speed) = p.get("speed").filter(|v| v.is_object()) {
             let avg = num(speed, "avg");
             let max = num(speed, "max");
@@ -752,16 +832,17 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
                 Some(v) if v > 0.0 => v / v.max(max.unwrap_or(0.0)),
                 _ => 0.0,
             };
-            content = content.push(meter(format!("{}{stat}", tr("Speed")), value, fraction));
+            content = content.push(meter(format!("{}{stat}", tr("Speed")), value, fraction, &self.skin));
         }
 
         content = content.push(section(tr("System")));
-        content = content.push(meter(tr("CPU"), pct(num(system, "cpu")), n(system, "cpu") / 100.0));
+        content = content.push(meter(tr("CPU"), pct(num(system, "cpu")), n(system, "cpu") / 100.0, &self.skin));
         let mem_total = n(system, "mem_total");
         content = content.push(meter(
             tr("RAM"),
             format!("{} / {} GiB", gib(n(system, "mem_used")), gib(mem_total)),
             if mem_total > 0.0 { n(system, "mem_used") / mem_total } else { 0.0 },
+            &self.skin,
         ));
 
         // One block per runtime.
@@ -774,7 +855,9 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         } else {
             content = content.push(dim(tr("Waiting for the collector…")));
         }
-        content.spacing(8).into()
+        if skin_style(&self.skin).is_some() {
+            container(content.spacing(8)).padding(12).class(card_style(&self.skin)).into()
+        } else { content.spacing(8).into() }
     }
 }
 
@@ -799,7 +882,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
         let mut core = core;
         maprisma_llm_monitor::look::solid(&mut core);
         let window_mode = WINDOW_MODE;
-        let mut app = Self { core, window_mode, shot_key: shot_key_setting(), corners: corners_setting(), ..Default::default() };
+        let mut app = Self { core, window_mode, shot_key: shot_key_setting(), corners: corners_setting(), skin: skin_setting(), ..Default::default() };
         app.task_manager = find_task_manager();
         // Debug builds only: start on the settings page (for off-screen screenshots).
         app.settings_open = cfg!(debug_assertions) && std::env::var("MAPRISMA_SHOT_PAGE").as_deref() == Ok("settings");
@@ -809,11 +892,12 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
             window_size::restore_position(window_size::parse_position(read_pref(window_size::POSITION_KEY).as_ref()), window_start_size());
         }
         corners::set_current(&app.corners);
+        app.rebuild_cached_theme();
         let task = if window_mode {
             app.set_header_title(tr("Maprisma LLM Monitor"));
             let id = app.core.main_window_id().unwrap();
             // The desktop's theme for the whole window (title bar too), see look.rs.
-            Task::batch([app.set_window_title(tr("Maprisma LLM Monitor"), id), corners::set_app_theme(&app.corners)])
+            Task::batch([app.set_window_title(tr("Maprisma LLM Monitor"), id), app.apply_window_theme()])
         } else { Task::none() };
         (app, task)
     }
@@ -821,7 +905,9 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     /// COSMIC's colours or light/dark mode changed: a window with its own corners (a custom
     /// theme, which libcosmic leaves alone) takes the new colours too.
     fn system_theme_update(&mut self, _keys: &[&'static str], new_theme: &cosmic::cosmic_theme::Theme) -> Task<Message> {
-        corners::system_theme_update(&self.corners, new_theme, self.window_mode)
+        let _: Task<Message> = corners::system_theme_update(&self.corners, new_theme, false);
+        self.rebuild_cached_theme();
+        self.apply_window_theme()
     }
 
     fn on_close_requested(&self, id: window::Id) -> Option<Message> {
@@ -876,7 +962,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Language(code) => { self.language_error = set_language(&code).is_err(); self.language_open = false; }
-            Message::ToggleLanguage => { self.language_open = !self.language_open; self.corners_open = false; }
+            Message::ToggleLanguage => { self.language_open = !self.language_open; self.corners_open = false; self.skin_open = false; }
             Message::ShotKey(id) => {
                 let shown = if self.window_mode { self.core.main_window_id() == Some(id) } else { self.popup == Some(id) };
                 if self.shot_key && shown && self.shot == shot::Phase::Idle {
@@ -907,9 +993,9 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
             Message::NoteDone => return self.finish_note(true),
             Message::Escape(id) => {
                 let shown = if self.window_mode { self.core.main_window_id() == Some(id) } else { self.popup == Some(id) };
-                match esc_step(self.shot.open(), self.language_open || self.corners_open, self.settings_open, shown) {
+                match esc_step(self.shot.open(), self.language_open || self.corners_open || self.skin_open, self.settings_open, shown) {
                     EscStep::Note => return self.finish_note(false),
-                    EscStep::Menus => { self.language_open = false; self.corners_open = false; }
+                    EscStep::Menus => { self.language_open = false; self.corners_open = false; self.skin_open = false; }
                     EscStep::Back => self.settings_open = false,
                     // Like the window's own close (the tray keeps running); the popup like a click on the icon.
                     EscStep::Close if self.window_mode => { self.save_size(true); return cosmic::iced::exit(); }
@@ -929,7 +1015,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 self.setting_error = write_pref("screenshot_key", Some(on.into())).is_err();
                 self.shot_key = on;
             }
-            Message::ToggleCorners => { self.corners_open = !self.corners_open; self.language_open = false; }
+            Message::ToggleCorners => { self.corners_open = !self.corners_open; self.language_open = false; self.skin_open = false; }
             Message::Corners(choice) => {
                 let choice = corners::normalize(&choice);
                 // "Like the desktop" is the default: no key in config.json.
@@ -938,7 +1024,17 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 self.corners = choice.to_string();
                 corners::set_current(choice);
                 self.corners_open = false;
-                if self.window_mode { return corners::set_app_theme(choice); }
+                self.rebuild_cached_theme();
+                if self.window_mode { return self.apply_window_theme(); }
+            }
+            Message::ToggleSkin => { self.skin_open = !self.skin_open; self.language_open = false; self.corners_open = false; }
+            Message::SetSkin(selected) => {
+                let selected = skin::normalize_skin(&selected);
+                self.setting_error = write_pref(SKIN_KEY, (selected != "native").then(|| Value::from(selected))).is_err();
+                self.skin = selected.to_string();
+                self.skin_open = false;
+                self.rebuild_cached_theme();
+                if self.window_mode { return self.apply_window_theme(); }
             }
             Message::CheckClose => {
                 if window_mode::CLOSE.load(Ordering::Relaxed) { self.save_size(true); return cosmic::iced::exit(); }
@@ -951,11 +1047,16 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 let corners = corners_setting();
                 let mut restyle = corners != self.corners;
                 if restyle { corners::set_current(&corners); self.corners = corners; }
+                let skin = skin_setting();
+                if skin != self.skin { self.skin = skin; restyle = true; }
                 // The desktop's colours and corners (Maprisma Theme can change them any time).
                 restyle |= maprisma_llm_monitor::look::refresh();
+                if restyle {
+                    self.rebuild_cached_theme();
+                }
                 if restyle && self.window_mode {
                     if !self.busy() { self.pulse_dim = false; }
-                    return corners::set_app_theme(&self.corners);
+                    return self.apply_window_theme();
                 }
                 if !self.busy() {
                     self.pulse_dim = false;
@@ -1030,6 +1131,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 self.settings_open = !self.settings_open;
                 self.language_open = false;
                 self.corners_open = false;
+                self.skin_open = false;
             }
         }
         Task::none()
@@ -1037,7 +1139,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
 
     fn view(&self) -> Element<'_, Message> {
         maprisma_llm_monitor::look::keep_fonts();
-        if self.window_mode { return corners::apply_window(&self.corners, self.popup_content()); }
+        if self.window_mode { return self.themed_window_content(); }
         let horizontal = matches!(self.core.applet.anchor, PanelAnchor::Top | PanelAnchor::Bottom);
         let padding = self.core.applet.suggested_padding(true).0;
         let button = button::custom(self.panel_content())
@@ -1055,8 +1157,24 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
         maprisma_llm_monitor::look::keep_fonts();
-        if self.window_mode { return corners::apply_window(&self.corners, self.popup_content()); }
-        corners::apply(&self.corners, self.core.applet.popup_container(self.popup_content()))
+        if self.window_mode { return self.themed_window_content(); }
+        match self.cached_theme.clone() {
+            Some(theme) => {
+                let content: Element<Message> = if skin_style(&self.skin).is_some() {
+                    let bg = Color::from(theme.cosmic().bg_color());
+                    let fg = Color::from(theme.cosmic().on_bg_color());
+                    container(self.popup_content()).class(theme::Container::custom(move |_| iced_container::Style {
+                        background: Some(Background::Color(bg)),
+                        text_color: Some(fg),
+                        border: Border { radius: corners::now().radius.into(), ..Default::default() },
+                        ..Default::default()
+                    })).into()
+                } else { self.popup_content() };
+                cosmic::iced::widget::themer(Some(theme), self.core.applet.popup_container(content))
+                    .text_color(|t: &cosmic::Theme| t.cosmic().on_bg_color().into()).into()
+            }
+            None => self.core.applet.popup_container(self.popup_content()).into(),
+        }
     }
 
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
@@ -1134,7 +1252,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             .into(),
             _ => return None,
         };
-        let card = container(body).padding(16).width(Length::Fill).class(theme::Container::Card);
+        let card = container(body).padding(16).width(Length::Fill).class(if skin_style(&self.skin).is_some() { card_style(&self.skin) } else { theme::Container::Card });
         let card = container(card).padding(12).width(if self.window_mode { Length::Fill } else { Length::Fixed(POPUP_WIDTH) });
         Some(card.into())
     }
@@ -1184,6 +1302,25 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
             for (choice, label) in corner_choices {
                 let label = if self.corners == choice { format!("✓ {label}") } else { label };
                 page = page.push(menu_button(text::body(label)).on_press(Message::Corners(choice.into())));
+            }
+        }
+        page = page.push(padded_control(column![
+            row![
+                text::body(tr("App skin")),
+                space::horizontal().width(Length::Fill),
+                choice(skin_label(&self.skin), self.skin_open, Message::ToggleSkin),
+            ].spacing(12).align_y(Alignment::Center),
+            dim(tr("Visual accent for cards and borders; Native keeps your desktop theme untouched.")),
+        ].spacing(4)));
+        if self.skin_open {
+            for name in SKINS {
+                let label = skin_label(name);
+                let label = if self.skin == name { format!("✓ {label}") } else { label };
+                let row_content: Element<Message> = if let Some(style) = skin_style(name) {
+                    row![swatch(fill(style.accent, 5.0)), text::body(label)]
+                        .spacing(8).align_y(Alignment::Center).into()
+                } else { text::body(label).into() };
+                page = page.push(menu_button(row_content).on_press(Message::SetSkin(name.into())));
             }
         }
         if self.setting_error { page = page.push(padded_control(text::body(tr("Could not save the setting.")))); }
