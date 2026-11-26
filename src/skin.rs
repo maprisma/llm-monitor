@@ -1,7 +1,8 @@
 //! Optional visual accents for the app. Native follows the desktop theme.
 
-use crate::{corners, i18n::tr, look};
+use crate::i18n::tr;
 use cosmic::iced::Color;
+use maprisma_kit::{corners, look};
 
 pub const SKIN_KEY: &str = "skin";
 pub const SKINS: [&str; 6] = ["native", "synthwave", "cozy", "terminal", "disco", "zen"];

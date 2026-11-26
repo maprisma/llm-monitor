@@ -9,10 +9,10 @@
 // seconds. It only reads /proc, sysfs and the runtimes' local APIs; it never
 // starts or stops a runtime.
 
-use maprisma_llm_monitor::{corners, script_path, shot, skin::{self, SKIN_KEY, SKINS, skin_label, skin_style}, i18n::{tr, trf, language_options, set_language, read_pref, write_pref}};
+use maprisma_kit::{AppInfo, corners, look, shot, window_size};
+use maprisma_llm_monitor::{script_path, skin::{self, SKIN_KEY, SKINS, skin_label, skin_style}, i18n::{tr, trf, language_options, set_language, read_pref, write_pref}};
 use cosmic::app::ApplicationExt;
 mod window_mode;
-mod window_size;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,9 +37,9 @@ const ICON: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-symbolic";
 /// The chip without its core, while no model is loaded.
 const ICON_OFF: &str = "io.github.ubruckhaus.CosmicMaprismaLlmMonitor-off-symbolic";
 static AUTOSIZE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("llm-monitor-autosize"));
-static NOTE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("llm-monitor-shot-note"));
+static NOTE_ID: LazyLock<Id> = LazyLock::new(Id::unique);
 // F12 pictures go to ~/Pictures/<this>/ (the app's name, the same in every language).
-const SHOT_FOLDER: &str = "Maprisma LLM Monitor";
+const SHOT_APP: AppInfo = AppInfo::new(APP_ID, "Maprisma LLM Monitor");
 
 const GIB: f64 = 1073741824.0;
 const MIB: f64 = 1048576.0;
@@ -66,11 +66,11 @@ fn main() -> cosmic::iced::Result {
             runtime.block_on(window_mode::close_running());
             return Ok(());
         };
-        cosmic::app::run::<Monitor<true>>(cosmic::app::Settings::default().default_font(maprisma_llm_monitor::look::default_font())
+        cosmic::app::run::<Monitor<true>>(cosmic::app::Settings::default().default_font(look::default_font())
             .size({ let (width, height) = window_start_size(); cosmic::iced::Size::new(width, height) })
             .resizable(Some(8.0)).transparent(false).is_daemon(false), ())
     } else {
-        maprisma_llm_monitor::look::keep_fonts();
+        look::keep_fonts();
         cosmic::applet::run::<Monitor<false>>(())
     }
 }
@@ -516,14 +516,14 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
         if !self.window_mode { return Task::none(); }
         Task::batch([
             cosmic::command::set_theme(self.cached_theme.clone().unwrap_or_else(cosmic::theme::system_preference)),
-            cosmic::command::set_scaling_factor(maprisma_llm_monitor::look::text_scale()),
+            cosmic::command::set_scaling_factor(look::text_scale()),
         ])
     }
 
     fn themed_window_content(&self) -> Element<'_, Message> {
         match self.cached_theme.clone() {
             Some(theme) => cosmic::iced::widget::themer(Some(theme), self.popup_content())
-                .background(maprisma_llm_monitor::look::window_background)
+                .background(look::window_background)
                 .text_color(|t: &cosmic::Theme| t.cosmic().on_bg_color().into())
                 .into(),
             None => self.popup_content(),
@@ -880,7 +880,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
 
     fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
         let mut core = core;
-        maprisma_llm_monitor::look::solid(&mut core);
+        look::solid(&mut core);
         let window_mode = WINDOW_MODE;
         let mut app = Self { core, window_mode, shot_key: shot_key_setting(), corners: corners_setting(), skin: skin_setting(), ..Default::default() };
         app.task_manager = find_task_manager();
@@ -974,7 +974,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
             Message::Captured(picture) => {
                 if !std::mem::take(&mut self.capturing) { return Task::none(); }
                 let (width, height) = (picture.size.width, picture.size.height);
-                return off_thread(move || shot::save_screenshot(SHOT_FOLDER, &picture.rgba, width, height), Message::ShotSaved);
+                return off_thread(move || shot::save_screenshot_for(&SHOT_APP, &picture.rgba, width, height), Message::ShotSaved);
             }
             Message::ShotSaved(result) => {
                 self.shot = match result {
@@ -1050,7 +1050,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
                 let skin = skin_setting();
                 if skin != self.skin { self.skin = skin; restyle = true; }
                 // The desktop's colours and corners (Maprisma Theme can change them any time).
-                restyle |= maprisma_llm_monitor::look::refresh();
+                restyle |= look::refresh();
                 if restyle {
                     self.rebuild_cached_theme();
                 }
@@ -1138,7 +1138,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        maprisma_llm_monitor::look::keep_fonts();
+        look::keep_fonts();
         if self.window_mode { return self.themed_window_content(); }
         let horizontal = matches!(self.core.applet.anchor, PanelAnchor::Top | PanelAnchor::Bottom);
         let padding = self.core.applet.suggested_padding(true).0;
@@ -1156,7 +1156,7 @@ impl<const WINDOW_MODE: bool> cosmic::Application for Monitor<WINDOW_MODE> {
     }
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
-        maprisma_llm_monitor::look::keep_fonts();
+        look::keep_fonts();
         if self.window_mode { return self.themed_window_content(); }
         match self.cached_theme.clone() {
             Some(theme) => {
@@ -1191,7 +1191,7 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
                     // Busy until the note is written, so a new F12 cannot replace it.
                     self.shot = shot::Phase::Noting;
                     return off_thread(
-                        move || shot::save_note(&path, SHOT_FOLDER, &text).map(|_| ()).map_err(|e| e.to_string()),
+                        move || shot::save_note_for(&SHOT_APP, &path, &text).map(|_| ()).map_err(|e| e.to_string()),
                         Message::NoteSaved,
                     );
                 }
@@ -1232,29 +1232,21 @@ impl<const WINDOW_MODE: bool> Monitor<WINDOW_MODE> {
 
     // After F12: "Screenshot saved", where, the optional note and Done (or the error and Done).
     fn shot_overlay(&self) -> Option<Element<'_, Message>> {
-        let body: Element<Message> = match &self.shot {
-            shot::Phase::Note { shown, text: note, .. } => column![
-                text::heading(tr("Screenshot saved")),
-                dim(trf("Saved as {0}", &[shown.clone()])),
-                cosmic::widget::text_input(tr("What is wrong? (optional)"), note.as_str())
-                    .id(NOTE_ID.clone())
-                    .on_input(Message::NoteInput)
-                    .on_submit(|_| Message::NoteDone),
-                row![space::horizontal().width(Length::Fill), button::suggested(tr("Done")).on_press(Message::NoteDone)],
-            ]
-            .spacing(10)
-            .into(),
-            shot::Phase::Error(reason) => column![
-                text::body(reason.clone()),
-                row![space::horizontal().width(Length::Fill), button::suggested(tr("Done")).on_press(Message::NoteDone)],
-            ]
-            .spacing(10)
-            .into(),
-            _ => return None,
+        let labels = shot::ShotLabels {
+            saved_heading: tr("Screenshot saved"),
+            saved_as_template: tr("Saved as {0}"),
+            note_placeholder: tr("What is wrong? (optional)"),
+            done_button: tr("Done"),
+            save_error_template: tr("The screenshot could not be saved: {0}"),
+            note_error_template: tr("The note could not be saved: {0}"),
         };
-        let card = container(body).padding(16).width(Length::Fill).class(if skin_style(&self.skin).is_some() { card_style(&self.skin) } else { theme::Container::Card });
-        let card = container(card).padding(12).width(if self.window_mode { Length::Fill } else { Length::Fixed(POPUP_WIDTH) });
-        Some(card.into())
+        let style = if skin_style(&self.skin).is_some() {
+            card_style(&self.skin)
+        } else {
+            theme::Container::Card
+        };
+        let width = if self.window_mode { Length::Fill } else { Length::Fixed(POPUP_WIDTH) };
+        shot::note_overlay(&self.shot, NOTE_ID.clone(), &labels, style, width, Message::NoteInput, Message::NoteDone)
     }
 
     /// Settings (as Maprisma Launcher's page): ← Back and the title, then one row per setting,
